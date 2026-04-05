@@ -49,12 +49,21 @@ export function TopBar({ state }: TopBarProps) {
           {dynasty}
         </span>
         <span style={{ color: '#888' }}>
-          (Player {state.currentPlayer + 1})
+          (Player {state.currentPlayer + 1}{currentPlayer.isAI ? ' - AI' : ''})
         </span>
       </div>
 
-      <div style={{ color: '#aaa' }}>
+      <div style={{ color: '#aaa', display: 'flex', alignItems: 'center', gap: '8px' }}>
         {PHASE_LABELS[state.turnPhase] ?? state.turnPhase}
+        {currentPlayer.isAI && state.turnPhase !== 'gameOver' && (
+          <span style={{
+            color: '#f39c12',
+            fontSize: '12px',
+            animation: 'pulse 1.5s ease-in-out infinite',
+          }}>
+            AI is thinking...
+          </span>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>

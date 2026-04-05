@@ -25,6 +25,7 @@ function App() {
   } = useGame()
 
   const currentPlayer = state.players[state.currentPlayer]
+  const isAITurn = !!currentPlayer.isAI
   const isActionPhase = state.turnPhase === 'action'
 
   // Compute valid placements for highlighting
@@ -181,7 +182,7 @@ function App() {
         hand={currentPlayer.hand}
         selectedTile={selectedTile}
         onSelectTile={setSelectedTile}
-        disabled={!isActionPhase}
+        disabled={!isActionPhase || isAITurn}
       />
 
       <ActionBar
@@ -193,7 +194,7 @@ function App() {
         onSwapTiles={handleSwapTiles}
         onPass={handlePass}
         onWithdrawLeader={handleWithdrawLeader}
-        disabled={!isActionPhase}
+        disabled={!isActionPhase || isAITurn}
       />
 
       {/* Dialog overlays */}

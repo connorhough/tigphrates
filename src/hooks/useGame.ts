@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { gameReducer } from '../engine/reducer'
 import { createGame } from '../engine/setup'
 import { GameState, GameAction, TileColor, LeaderColor } from '../engine/types'
+import { getAIAction } from '../ai/simpleAI'
 
 interface UseGameReturn {
   state: GameState
@@ -58,6 +59,20 @@ export function useGame(): UseGameReturn {
       setSelectedLeader(null)
     }
   }, [])
+
+  // Auto-trigger AI turns
+  useEffect(() => {
+    const player = state.players[state.currentPlayer]
+    if (!player.isAI) return
+    if (state.turnPhase === 'gameOver') return
+
+    const timeout = setTimeout(() => {
+      const action = getAIAction(state)
+      dispatch({ ...action, playerIndex: state.currentPlayer })
+    }, 500)
+
+    return () => clearTimeout(timeout)
+  }, [state, dispatch])
 
   return {
     state,
