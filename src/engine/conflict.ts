@@ -96,7 +96,7 @@ export function countWarSupportTiles(
     const cell = board[neighbor.row][neighbor.col]
     if (cell.tile !== null || cell.leader !== null) {
       queue.push(neighbor)
-      if (cell.tile === warColor) count++
+      if (cell.tile === warColor && !cell.tileFlipped) count++
     }
   }
 
@@ -110,7 +110,7 @@ export function countWarSupportTiles(
       const cell = board[neighbor.row][neighbor.col]
       if (cell.tile !== null || cell.leader !== null) {
         queue.push(neighbor)
-        if (cell.tile === warColor) count++
+        if (cell.tile === warColor && !cell.tileFlipped) count++
       }
     }
   }
@@ -250,7 +250,7 @@ function collectWarColorTiles(
     const cell = board[neighbor.row][neighbor.col]
     if (cell.tile !== null || cell.leader !== null) {
       queue.push(neighbor)
-      if (cell.tile === warColor) result.push(neighbor)
+      if (cell.tile === warColor && !cell.tileFlipped) result.push(neighbor)
     }
   }
 
@@ -263,7 +263,7 @@ function collectWarColorTiles(
       const cell = board[neighbor.row][neighbor.col]
       if (cell.tile !== null || cell.leader !== null) {
         queue.push(neighbor)
-        if (cell.tile === warColor) result.push(neighbor)
+        if (cell.tile === warColor && !cell.tileFlipped) result.push(neighbor)
       }
     }
   }
@@ -289,9 +289,20 @@ export function setupWarConflict(
     }
   }
 
-  // Active player's leader is the attacker
-  const attackerEntry = leadersOnBoard.find(l => l.playerIndex === state.currentPlayer)!
-  const defenderEntry = leadersOnBoard.find(l => l.playerIndex !== state.currentPlayer)!
+  // Active player's leader is the attacker if they have one; otherwise next player clockwise
+  let attackerEntry = leadersOnBoard.find(l => l.playerIndex === state.currentPlayer)
+  if (!attackerEntry) {
+    // Find next player clockwise from current player
+    for (let offset = 1; offset < state.players.length; offset++) {
+      const pi = (state.currentPlayer + offset) % state.players.length
+      attackerEntry = leadersOnBoard.find(l => l.playerIndex === pi)
+      if (attackerEntry) break
+    }
+  }
+  if (!attackerEntry) {
+    throw new Error('No attacker found for war')
+  }
+  const defenderEntry = leadersOnBoard.find(l => l !== attackerEntry)!
 
   const attackerStrength = countWarSupportTiles(
     state.board,
@@ -325,7 +336,7 @@ export function setupWarConflict(
 /**
  * Withdraw any leaders that are not adjacent to a face-up red temple tile.
  */
-function withdrawStrandedLeaders(state: GameState): void {
+export function withdrawStrandedLeaders(state: GameState): void {
   for (const player of state.players) {
     for (const leaderEntry of player.leaders) {
       if (!leaderEntry.position) continue

@@ -1,6 +1,7 @@
 import { GameState, GameAction, TileColor, LeaderColor, Position } from './types'
 import { findKingdoms, getNeighbors } from './board'
 import { countAdjacentTemples, resolveRevolt, resolveWar, setupWarConflict } from './conflict'
+import { find2x2Square, getAvailableMonuments, buildMonument as buildMonumentFn } from './monument'
 
 export function applyAction(state: GameState, action: GameAction): GameState {
   const next = structuredClone(state)
@@ -34,6 +35,12 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case 'chooseWarOrder':
       return handleChooseWarOrder(next, action.color)
+
+    case 'buildMonument':
+      return handleBuildMonument(next, action.monumentId)
+
+    case 'declineMonument':
+      return handleDeclineMonument(next)
 
     default:
       throw new Error(`Unhandled action type: ${(action as GameAction).type}`)
@@ -205,6 +212,18 @@ function handlePlaceTile(state: GameState, color: TileColor, position: Position)
     }
   }
 
+  // Check for 2x2 same-color square (monument opportunity)
+  const square = find2x2Square(state.board, position)
+  if (square) {
+    const available = getAvailableMonuments(state.monuments, square.color)
+    if (available.length > 0) {
+      state.pendingMonument = { position: square.topLeft, color: square.color }
+      state.turnPhase = 'monumentChoice'
+      // Do NOT decrement actionsRemaining — that happens after monument choice
+      return state
+    }
+  }
+
   state.actionsRemaining -= 1
   return state
 }
@@ -350,6 +369,33 @@ function handleChooseWarOrder(state: GameState, color: LeaderColor): GameState {
 
   setupWarConflict(state, color, unificationPos, remaining)
   state.turnPhase = 'conflictSupport'
+
+  return state
+}
+
+function handleBuildMonument(state: GameState, monumentId: string): GameState {
+  if (state.turnPhase !== 'monumentChoice' || !state.pendingMonument) {
+    throw new Error('Not in monument choice phase')
+  }
+
+  const topLeft = state.pendingMonument.position
+  buildMonumentFn(state, monumentId, topLeft)
+
+  state.pendingMonument = null
+  state.turnPhase = 'action'
+  state.actionsRemaining -= 1
+
+  return state
+}
+
+function handleDeclineMonument(state: GameState): GameState {
+  if (state.turnPhase !== 'monumentChoice' || !state.pendingMonument) {
+    throw new Error('Not in monument choice phase')
+  }
+
+  state.pendingMonument = null
+  state.turnPhase = 'action'
+  state.actionsRemaining -= 1
 
   return state
 }
