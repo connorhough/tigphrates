@@ -1,6 +1,6 @@
 import { GameState, GameAction, TileColor, LeaderColor, Position } from './types'
-import { findKingdoms, getNeighbors, findConnectedGroup } from './board'
-import { countAdjacentTemples, resolveRevolt } from './conflict'
+import { findKingdoms, getNeighbors } from './board'
+import { countAdjacentTemples, resolveRevolt, resolveWar, setupWarConflict } from './conflict'
 
 export function applyAction(state: GameState, action: GameAction): GameState {
   const next = structuredClone(state)
@@ -31,6 +31,9 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case 'commitSupport':
       return handleCommitSupport(next, action.indices)
+
+    case 'chooseWarOrder':
+      return handleChooseWarOrder(next, action.color)
 
     default:
       throw new Error(`Unhandled action type: ${(action as GameAction).type}`)
@@ -104,13 +107,70 @@ function handlePlaceTile(state: GameState, color: TileColor, position: Position)
     throw new Error(`Player does not have a ${color} tile`)
   }
 
+  // Remember kingdoms BEFORE placing the tile to detect unification
+  const kingdomsBefore = findKingdoms(state.board)
+  // Find which kingdoms the neighbors of this position belong to
+  const neighborKingdomsBefore = new Map<string, typeof kingdomsBefore[0]>()
+  for (const neighbor of getNeighbors(position)) {
+    for (const kingdom of kingdomsBefore) {
+      if (kingdom.leaders.length > 0 &&
+          kingdom.positions.some(p => p.row === neighbor.row && p.col === neighbor.col)) {
+        const id = kingdom.positions.map(p => `${p.row},${p.col}`).sort().join('|')
+        if (!neighborKingdomsBefore.has(id)) {
+          neighborKingdomsBefore.set(id, kingdom)
+        }
+      }
+    }
+  }
+
   // Place tile on board
   cell.tile = color
 
   // Remove tile from hand
   player.hand.splice(tileIndex, 1)
 
-  // Score: find which kingdom the tile is now in
+  // Check if tile united two kingdoms (war detection)
+  const distinctNeighborKingdoms = [...neighborKingdomsBefore.values()]
+  if (distinctNeighborKingdoms.length >= 2) {
+    // Find leader colors that appear in multiple kingdoms
+    const leaderColorsByKingdom = distinctNeighborKingdoms.map(k =>
+      new Set(k.leaders.map(l => l.color))
+    )
+    const warColors: LeaderColor[] = []
+    const allColors: LeaderColor[] = ['red', 'blue', 'green', 'black']
+    for (const c of allColors) {
+      let count = 0
+      for (const colorSet of leaderColorsByKingdom) {
+        if (colorSet.has(c)) count++
+      }
+      if (count >= 2) warColors.push(c)
+    }
+
+    if (warColors.length === 1) {
+      // Single war — go directly to conflictSupport
+      setupWarConflict(state, warColors[0], position, [])
+      state.turnPhase = 'conflictSupport'
+      return state
+    } else if (warColors.length >= 2) {
+      // Multiple wars — player must choose order
+      state.pendingConflict = {
+        type: 'war',
+        color: warColors[0],
+        attacker: { playerIndex: state.currentPlayer, position: { row: 0, col: 0 } },
+        defender: { playerIndex: 0, position: { row: 0, col: 0 } },
+        attackerStrength: 0,
+        defenderStrength: 0,
+        attackerCommitted: null,
+        defenderCommitted: null,
+        pendingWarColors: warColors,
+        unificationTilePosition: position,
+      }
+      state.turnPhase = 'warOrderChoice'
+      return state
+    }
+  }
+
+  // No war — score normally
   const kingdoms = findKingdoms(state.board)
   const kingdom = kingdoms.find(k =>
     k.positions.some(p => p.row === position.row && p.col === position.col)
@@ -252,12 +312,13 @@ function handleCommitSupport(state: GameState, indices: number[]): GameState {
   const player = state.players[committingPlayerIndex]
 
   // Validate indices and tile colors
+  const requiredColor = conflict.type === 'revolt' ? 'red' : conflict.color
   for (const idx of indices) {
     if (idx < 0 || idx >= player.hand.length) {
       throw new Error(`Invalid tile index: ${idx}`)
     }
-    if (conflict.type === 'revolt' && player.hand[idx] !== 'red') {
-      throw new Error('Only red tiles can be committed during a revolt')
+    if (player.hand[idx] !== requiredColor) {
+      throw new Error(`Only ${requiredColor} tiles can be committed during a ${conflict.type === 'revolt' ? 'revolt' : `${conflict.color} war`}`)
     }
   }
 
@@ -266,6 +327,29 @@ function handleCommitSupport(state: GameState, indices: number[]): GameState {
     return state
   } else {
     conflict.defenderCommitted = indices
-    return resolveRevolt(state)
+    if (conflict.type === 'revolt') {
+      return resolveRevolt(state)
+    } else {
+      return resolveWar(state)
+    }
   }
+}
+
+function handleChooseWarOrder(state: GameState, color: LeaderColor): GameState {
+  if (state.turnPhase !== 'warOrderChoice' || !state.pendingConflict) {
+    throw new Error('Not in war order choice phase')
+  }
+
+  const pending = state.pendingConflict.pendingWarColors ?? []
+  if (!pending.includes(color)) {
+    throw new Error(`${color} is not a pending war color`)
+  }
+
+  const remaining = pending.filter(c => c !== color)
+  const unificationPos = state.pendingConflict.unificationTilePosition!
+
+  setupWarConflict(state, color, unificationPos, remaining)
+  state.turnPhase = 'conflictSupport'
+
+  return state
 }
