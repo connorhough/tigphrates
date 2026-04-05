@@ -28,7 +28,12 @@ function handleConflictSupport(state: GameState): GameAction {
   const conflict = state.pendingConflict
   if (!conflict) return { type: 'commitSupport', indices: [] }
 
-  const player = state.players[state.currentPlayer]
+  // Determine who is committing: attacker first, then defender
+  const isAttackerTurn = conflict.attackerCommitted === null
+  const playerIndex = isAttackerTurn
+    ? conflict.attacker.playerIndex
+    : conflict.defender.playerIndex
+  const player = state.players[playerIndex]
   const supportColor: TileColor = conflict.type === 'revolt' ? 'red' : conflict.color as TileColor
 
   // Find indices of matching tiles in hand
@@ -39,8 +44,8 @@ function handleConflictSupport(state: GameState): GameAction {
     }
   }
 
-  // Determine if AI is attacker or defender
-  const isAttacker = conflict.attacker.playerIndex === state.currentPlayer
+  // Use already-determined attacker/defender status
+  const isAttacker = isAttackerTurn
   const myStrength = isAttacker ? conflict.attackerStrength : conflict.defenderStrength
   const opponentStrength = isAttacker ? conflict.defenderStrength : conflict.attackerStrength
 

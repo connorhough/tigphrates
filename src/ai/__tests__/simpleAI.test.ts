@@ -64,6 +64,7 @@ describe('simpleAI', () => {
     const state = freshAIState()
     state.turnPhase = 'conflictSupport'
     // AI is defender (player 1), has NO red tiles
+    // Attacker has already committed, so now it's defender's turn
     state.players[1].hand = ['blue', 'green', 'black', 'blue', 'green', 'black']
     state.pendingConflict = {
       type: 'revolt',
@@ -72,7 +73,7 @@ describe('simpleAI', () => {
       defender: { playerIndex: 1, position: { row: 1, col: 0 } },
       attackerStrength: 3,
       defenderStrength: 1,
-      attackerCommitted: null,
+      attackerCommitted: [0, 1],
       defenderCommitted: null,
     }
     const action = getAIAction(state)
