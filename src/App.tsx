@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useGame } from './hooks/useGame'
 import { GameBoard } from './components/GameBoard'
 import { TopBar } from './components/TopBar'
@@ -9,10 +9,12 @@ import { ConflictDialog } from './components/ConflictDialog'
 import { MonumentDialog } from './components/MonumentDialog'
 import { WarOrderDialog } from './components/WarOrderDialog'
 import { GameOverScreen } from './components/GameOverScreen'
+import { SetupScreen } from './components/SetupScreen'
 import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from './engine/validation'
 import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS } from './engine/types'
 
 function App() {
+  const [gameStarted, setGameStarted] = useState(false)
   const {
     state,
     dispatch,
@@ -151,6 +153,13 @@ function App() {
     })
   }, [state.currentPlayer, dispatch])
 
+  if (!gameStarted) {
+    return <SetupScreen onStartGame={(count, flags) => {
+      startNewGame(count, flags)
+      setGameStarted(true)
+    }} />
+  }
+
   return (
     <div style={{
       display: 'flex',
@@ -225,33 +234,9 @@ function App() {
       {state.turnPhase === 'gameOver' && (
         <GameOverScreen
           state={state}
-          onPlayAgain={() => startNewGame(state.players.length)}
+          onPlayAgain={() => setGameStarted(false)}
         />
       )}
-
-      {/* New Game button (temporary, for dev) */}
-      <div style={{
-        position: 'fixed',
-        top: '8px',
-        right: '8px',
-        zIndex: 100,
-      }}>
-        <button
-          onClick={() => startNewGame(2)}
-          style={{
-            padding: '4px 10px',
-            borderRadius: '4px',
-            border: '1px solid #0f3460',
-            background: '#0f1b3e',
-            color: '#888',
-            cursor: 'pointer',
-            fontSize: '11px',
-            fontFamily: 'sans-serif',
-          }}
-        >
-          New Game
-        </button>
-      </div>
     </div>
   )
 }
