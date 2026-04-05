@@ -8,6 +8,7 @@ import { ActionBar } from './components/ActionBar'
 import { ConflictDialog } from './components/ConflictDialog'
 import { MonumentDialog } from './components/MonumentDialog'
 import { WarOrderDialog } from './components/WarOrderDialog'
+import { GameOverScreen } from './components/GameOverScreen'
 import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from './engine/validation'
 import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS } from './engine/types'
 
@@ -218,6 +219,13 @@ function App() {
         <WarOrderDialog
           state={state}
           onChooseWarOrder={handleChooseWarOrder}
+        />
+      )}
+
+      {state.turnPhase === 'gameOver' && (
+        <GameOverScreen
+          state={state}
+          onPlayAgain={() => startNewGame(state.players.length)}
         />
       )}
 
