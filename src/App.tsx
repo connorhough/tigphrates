@@ -5,8 +5,11 @@ import { TopBar } from './components/TopBar'
 import { PlayerPanel } from './components/PlayerPanel'
 import { HandPanel } from './components/HandPanel'
 import { ActionBar } from './components/ActionBar'
-import { getValidTilePlacements, getValidLeaderPlacements } from './engine/validation'
-import { Position, LeaderColor } from './engine/types'
+import { ConflictDialog } from './components/ConflictDialog'
+import { MonumentDialog } from './components/MonumentDialog'
+import { WarOrderDialog } from './components/WarOrderDialog'
+import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from './engine/validation'
+import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS } from './engine/types'
 
 function App() {
   const {
@@ -14,8 +17,10 @@ function App() {
     dispatch,
     selectedTile,
     selectedLeader,
+    placingCatastrophe,
     setSelectedTile,
     setSelectedLeader,
+    setPlacingCatastrophe,
     startNewGame,
   } = useGame()
 
@@ -25,6 +30,18 @@ function App() {
   // Compute valid placements for highlighting
   const highlights = useMemo<Position[]>(() => {
     if (!isActionPhase) return []
+    if (placingCatastrophe) {
+      // Highlight all cells where catastrophe can be placed
+      const valid: Position[] = []
+      for (let row = 0; row < BOARD_ROWS; row++) {
+        for (let col = 0; col < BOARD_COLS; col++) {
+          if (canPlaceCatastrophe(state, { row, col })) {
+            valid.push({ row, col })
+          }
+        }
+      }
+      return valid
+    }
     if (selectedTile) {
       return getValidTilePlacements(state, selectedTile)
     }
@@ -32,11 +49,21 @@ function App() {
       return getValidLeaderPlacements(state, selectedLeader)
     }
     return []
-  }, [state, selectedTile, selectedLeader, isActionPhase])
+  }, [state, selectedTile, selectedLeader, placingCatastrophe, isActionPhase])
 
   // Handle cell click on board
   const handleCellClick = useCallback((pos: Position) => {
     if (!isActionPhase) return
+
+    if (placingCatastrophe) {
+      dispatch({
+        type: 'placeCatastrophe',
+        position: pos,
+        playerIndex: state.currentPlayer,
+      })
+      setPlacingCatastrophe(false)
+      return
+    }
 
     if (selectedTile) {
       dispatch({
@@ -59,10 +86,9 @@ function App() {
       setSelectedLeader(null)
       return
     }
-  }, [isActionPhase, selectedTile, selectedLeader, state.currentPlayer, dispatch, setSelectedTile, setSelectedLeader])
+  }, [isActionPhase, placingCatastrophe, selectedTile, selectedLeader, state.currentPlayer, dispatch, setSelectedTile, setSelectedLeader, setPlacingCatastrophe])
 
   const handleSwapTiles = useCallback(() => {
-    // For now, swap all tiles (a full UI would let user pick which tiles)
     const indices = currentPlayer.hand.map((_, i) => i)
     dispatch({
       type: 'swapTiles',
@@ -78,14 +104,19 @@ function App() {
     })
   }, [state.currentPlayer, dispatch])
 
-  const handleCommitSupport = useCallback(() => {
-    // For now, commit with no support tiles (empty array)
+  const handleCommitSupport = useCallback((indices: number[]) => {
+    // Determine who is committing
+    const conflict = state.pendingConflict
+    if (!conflict) return
+    const committingPlayer = conflict.attackerCommitted === null
+      ? conflict.attacker.playerIndex
+      : conflict.defender.playerIndex
     dispatch({
       type: 'commitSupport',
-      indices: [],
-      playerIndex: state.currentPlayer,
+      indices,
+      playerIndex: committingPlayer,
     })
-  }, [state.currentPlayer, dispatch])
+  }, [state.pendingConflict, dispatch])
 
   const handleBuildMonument = useCallback((monumentId: string) => {
     dispatch({
@@ -98,6 +129,14 @@ function App() {
   const handleDeclineMonument = useCallback(() => {
     dispatch({
       type: 'declineMonument',
+      playerIndex: state.currentPlayer,
+    })
+  }, [state.currentPlayer, dispatch])
+
+  const handleChooseWarOrder = useCallback((color: LeaderColor) => {
+    dispatch({
+      type: 'chooseWarOrder',
+      color,
       playerIndex: state.currentPlayer,
     })
   }, [state.currentPlayer, dispatch])
@@ -148,15 +187,38 @@ function App() {
       <ActionBar
         state={state}
         selectedLeader={selectedLeader}
+        placingCatastrophe={placingCatastrophe}
         onSelectLeader={setSelectedLeader}
+        onPlaceCatastrophe={setPlacingCatastrophe}
         onSwapTiles={handleSwapTiles}
         onPass={handlePass}
-        onCommitSupport={handleCommitSupport}
-        onBuildMonument={handleBuildMonument}
-        onDeclineMonument={handleDeclineMonument}
         onWithdrawLeader={handleWithdrawLeader}
-        disabled={!isActionPhase && state.turnPhase !== 'conflictSupport' && state.turnPhase !== 'monumentChoice'}
+        disabled={!isActionPhase}
       />
+
+      {/* Dialog overlays */}
+      {state.turnPhase === 'conflictSupport' && state.pendingConflict && (
+        <ConflictDialog
+          state={state}
+          currentViewingPlayer={state.currentPlayer}
+          onCommitSupport={handleCommitSupport}
+        />
+      )}
+
+      {state.turnPhase === 'monumentChoice' && state.pendingMonument && (
+        <MonumentDialog
+          state={state}
+          onBuildMonument={handleBuildMonument}
+          onDeclineMonument={handleDeclineMonument}
+        />
+      )}
+
+      {state.turnPhase === 'warOrderChoice' && state.pendingConflict?.pendingWarColors && (
+        <WarOrderDialog
+          state={state}
+          onChooseWarOrder={handleChooseWarOrder}
+        />
+      )}
 
       {/* New Game button (temporary, for dev) */}
       <div style={{

@@ -1,14 +1,13 @@
-import { GameState, LeaderColor, MonumentId } from '../engine/types'
+import { GameState, LeaderColor } from '../engine/types'
 
 interface ActionBarProps {
   state: GameState
   selectedLeader: LeaderColor | null
+  placingCatastrophe: boolean
   onSelectLeader: (color: LeaderColor | null) => void
+  onPlaceCatastrophe: (v: boolean) => void
   onSwapTiles: () => void
   onPass: () => void
-  onCommitSupport: () => void
-  onBuildMonument: (monumentId: MonumentId) => void
-  onDeclineMonument: () => void
   onWithdrawLeader: (color: LeaderColor) => void
   disabled?: boolean
 }
@@ -18,13 +17,6 @@ const LEADER_DISPLAY: Record<LeaderColor, { label: string; color: string }> = {
   blue: { label: 'Farmer', color: '#3498db' },
   green: { label: 'Trader', color: '#2ecc71' },
   black: { label: 'King', color: '#555' },
-}
-
-const MONUMENT_COLORS: Record<string, string> = {
-  red: '#e74c3c',
-  blue: '#3498db',
-  green: '#2ecc71',
-  black: '#555',
 }
 
 const btnBase: React.CSSProperties = {
@@ -48,12 +40,11 @@ const btnActive: React.CSSProperties = {
 export function ActionBar({
   state,
   selectedLeader,
+  placingCatastrophe,
   onSelectLeader,
+  onPlaceCatastrophe,
   onSwapTiles,
   onPass,
-  onCommitSupport,
-  onBuildMonument,
-  onDeclineMonument,
   onWithdrawLeader,
   disabled,
 }: ActionBarProps) {
@@ -142,6 +133,16 @@ export function ActionBar({
             Swap Tiles
           </button>
 
+          {currentPlayer.catastrophesRemaining > 0 && (
+            <button
+              disabled={disabled}
+              style={placingCatastrophe ? btnActive : btnBase}
+              onClick={() => onPlaceCatastrophe(!placingCatastrophe)}
+            >
+              Catastrophe ({currentPlayer.catastrophesRemaining})
+            </button>
+          )}
+
           <button
             disabled={disabled}
             style={btnBase}
@@ -152,99 +153,25 @@ export function ActionBar({
         </>
       )}
 
-      {/* Conflict support phase */}
+      {/* Conflict support phase — handled by ConflictDialog overlay */}
       {phase === 'conflictSupport' && (
-        <>
-          <span style={{ color: '#f39c12' }}>
-            Conflict! Select tiles from hand to commit, then:
-          </span>
-          <button
-            disabled={disabled}
-            style={btnBase}
-            onClick={onCommitSupport}
-          >
-            Commit Support
-          </button>
-        </>
+        <span style={{ color: '#f39c12' }}>
+          Conflict in progress...
+        </span>
       )}
 
-      {/* War order choice */}
-      {phase === 'warOrderChoice' && state.pendingConflict?.pendingWarColors && (
-        <>
-          <span style={{ color: '#f39c12' }}>
-            Choose which war to resolve:
-          </span>
-          {state.pendingConflict.pendingWarColors.map(color => {
-            const display = LEADER_DISPLAY[color]
-            return (
-              <button
-                key={color}
-                disabled={disabled}
-                style={btnBase}
-                onClick={() => {
-                  /* war order choice handled via dispatch in App */
-                }}
-              >
-                <span style={{
-                  display: 'inline-block',
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: '50%',
-                  background: display.color,
-                  marginRight: '4px',
-                }} />
-                {display.label}
-              </button>
-            )
-          })}
-        </>
+      {/* War order choice — handled by WarOrderDialog overlay */}
+      {phase === 'warOrderChoice' && (
+        <span style={{ color: '#f39c12' }}>
+          Choose which war to resolve...
+        </span>
       )}
 
-      {/* Monument choice phase */}
+      {/* Monument choice — handled by MonumentDialog overlay */}
       {phase === 'monumentChoice' && (
-        <>
-          <span style={{ color: '#f39c12' }}>Build a monument?</span>
-          {state.monuments
-            .filter(m => m.position === null)
-            .filter(m => {
-              // Only show monuments matching the pending monument color
-              if (!state.pendingMonument) return false
-              return m.color1 === state.pendingMonument.color || m.color2 === state.pendingMonument.color
-            })
-            .map(monument => (
-              <button
-                key={monument.id}
-                disabled={disabled}
-                style={btnBase}
-                onClick={() => onBuildMonument(monument.id)}
-              >
-                <span style={{
-                  display: 'inline-block',
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: '2px',
-                  background: MONUMENT_COLORS[monument.color1],
-                  marginRight: '2px',
-                }} />
-                <span style={{
-                  display: 'inline-block',
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: '2px',
-                  background: MONUMENT_COLORS[monument.color2],
-                  marginRight: '4px',
-                }} />
-                {monument.id}
-              </button>
-            ))}
-          <button
-            disabled={disabled}
-            style={btnBase}
-            onClick={onDeclineMonument}
-          >
-            Decline
-          </button>
-        </>
+        <span style={{ color: '#f39c12' }}>
+          Monument choice pending...
+        </span>
       )}
 
       {/* Game over */}
