@@ -1,13 +1,13 @@
-import { GameState, GameAction, TileColor, LeaderColor, Position } from './types'
+import { GameState, GameAction, TileColor, LeaderColor, Position, BOARD_ROWS, BOARD_COLS } from './types'
 import { findKingdoms, getNeighbors } from './board'
-import { countAdjacentTemples, resolveRevolt, resolveWar, setupWarConflict } from './conflict'
+import { countAdjacentTemples, resolveRevolt, resolveWar, setupWarConflict, withdrawStrandedLeaders } from './conflict'
 import { find2x2Square, getAvailableMonuments, buildMonument as buildMonumentFn } from './monument'
 
 export function applyAction(state: GameState, action: GameAction): GameState {
   const next = structuredClone(state)
 
   // Actions that consume a turn action require actionsRemaining > 0
-  if (action.type === 'pass' || action.type === 'swapTiles' || action.type === 'withdrawLeader' || action.type === 'placeTile' || action.type === 'placeLeader') {
+  if (action.type === 'pass' || action.type === 'swapTiles' || action.type === 'withdrawLeader' || action.type === 'placeTile' || action.type === 'placeLeader' || action.type === 'placeCatastrophe') {
     if (next.actionsRemaining <= 0) {
       throw new Error('No actions remaining')
     }
@@ -29,6 +29,9 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case 'placeLeader':
       return handlePlaceLeader(next, action.color, action.position)
+
+    case 'placeCatastrophe':
+      return handlePlaceCatastrophe(next, action.position)
 
     case 'commitSupport':
       return handleCommitSupport(next, action.indices)
@@ -397,5 +400,44 @@ function handleDeclineMonument(state: GameState): GameState {
   state.turnPhase = 'action'
   state.actionsRemaining -= 1
 
+  return state
+}
+
+function handlePlaceCatastrophe(state: GameState, position: Position): GameState {
+  const player = state.players[state.currentPlayer]
+
+  if (player.catastrophesRemaining <= 0) {
+    throw new Error('No catastrophes remaining')
+  }
+
+  if (position.row < 0 || position.row >= BOARD_ROWS || position.col < 0 || position.col >= BOARD_COLS) {
+    throw new Error('Position out of bounds')
+  }
+
+  const cell = state.board[position.row][position.col]
+
+  if (cell.leader) {
+    throw new Error('Cannot place catastrophe on a leader')
+  }
+  if (cell.hasTreasure) {
+    throw new Error('Cannot place catastrophe on a treasure')
+  }
+  if (cell.monument) {
+    throw new Error('Cannot place catastrophe on a monument')
+  }
+  if (cell.catastrophe) {
+    throw new Error('Cannot place catastrophe on an existing catastrophe')
+  }
+
+  // Destroy any tile on the cell (removed from game, not returned to bag)
+  cell.tile = null
+  cell.catastrophe = true
+
+  player.catastrophesRemaining -= 1
+
+  // Re-evaluate kingdoms and withdraw stranded leaders
+  withdrawStrandedLeaders(state)
+
+  state.actionsRemaining -= 1
   return state
 }
