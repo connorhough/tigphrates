@@ -1,11 +1,12 @@
-import { GameState, GameAction, TileColor, Position } from './types'
-import { findKingdoms } from './board'
+import { GameState, GameAction, TileColor, LeaderColor, Position } from './types'
+import { findKingdoms, getNeighbors, findConnectedGroup } from './board'
+import { countAdjacentTemples, resolveRevolt } from './conflict'
 
 export function applyAction(state: GameState, action: GameAction): GameState {
   const next = structuredClone(state)
 
   // Actions that consume a turn action require actionsRemaining > 0
-  if (action.type === 'pass' || action.type === 'swapTiles' || action.type === 'withdrawLeader' || action.type === 'placeTile') {
+  if (action.type === 'pass' || action.type === 'swapTiles' || action.type === 'withdrawLeader' || action.type === 'placeTile' || action.type === 'placeLeader') {
     if (next.actionsRemaining <= 0) {
       throw new Error('No actions remaining')
     }
@@ -24,6 +25,12 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 
     case 'placeTile':
       return handlePlaceTile(next, action.color, action.position)
+
+    case 'placeLeader':
+      return handlePlaceLeader(next, action.color, action.position)
+
+    case 'commitSupport':
+      return handleCommitSupport(next, action.indices)
 
     default:
       throw new Error(`Unhandled action type: ${(action as GameAction).type}`)
@@ -140,4 +147,125 @@ function handlePlaceTile(state: GameState, color: TileColor, position: Position)
 
   state.actionsRemaining -= 1
   return state
+}
+
+function handlePlaceLeader(state: GameState, color: LeaderColor, position: Position): GameState {
+  const player = state.players[state.currentPlayer]
+  const cell = state.board[position.row][position.col]
+
+  // Must be empty land
+  if (cell.terrain !== 'land') {
+    throw new Error('Leaders must be placed on land')
+  }
+  if (cell.tile !== null || cell.leader !== null || cell.catastrophe || cell.monument !== null) {
+    throw new Error('Cell is not empty')
+  }
+
+  // Leader must not already be on board
+  const leaderEntry = player.leaders.find(l => l.color === color)!
+  if (leaderEntry.position !== null) {
+    throw new Error(`Leader ${color} is already on board`)
+  }
+
+  // Must be adjacent to at least one face-up red temple tile
+  const neighbors = getNeighbors(position)
+  const adjacentToTemple = neighbors.some(n => {
+    const c = state.board[n.row][n.col]
+    return c.tile === 'red' && !c.tileFlipped
+  })
+  if (!adjacentToTemple) {
+    throw new Error('Leader must be placed adjacent to a face-up red temple tile')
+  }
+
+  // Check: would this unite two or more kingdoms?
+  const neighborKingdomIds = new Set<string>()
+  const kingdoms = findKingdoms(state.board)
+  for (const neighbor of neighbors) {
+    for (const kingdom of kingdoms) {
+      if (kingdom.leaders.length > 0 && kingdom.positions.some(p => p.row === neighbor.row && p.col === neighbor.col)) {
+        const id = kingdom.positions.map(p => `${p.row},${p.col}`).sort().join('|')
+        neighborKingdomIds.add(id)
+      }
+    }
+  }
+  if (neighborKingdomIds.size > 1) {
+    throw new Error('Placing leader would unite two or more kingdoms')
+  }
+
+  // Place the leader
+  cell.leader = { color, dynasty: player.dynasty }
+  leaderEntry.position = position
+
+  // Check for revolt: is this leader now in a kingdom with another leader of the same color?
+  const updatedKingdoms = findKingdoms(state.board)
+  const kingdom = updatedKingdoms.find(k =>
+    k.positions.some(p => p.row === position.row && p.col === position.col)
+  )
+
+  if (kingdom) {
+    const sameColorLeaders = kingdom.leaders.filter(l => l.color === color)
+    if (sameColorLeaders.length === 2) {
+      // Revolt! Attacker = player who just placed, defender = existing leader's owner
+      const defenderLeader = sameColorLeaders.find(l =>
+        l.position.row !== position.row || l.position.col !== position.col
+      )!
+      const defenderPlayerIndex = state.players.findIndex(p =>
+        p.leaders.some(l => l.color === color && l.position &&
+          l.position.row === defenderLeader.position.row &&
+          l.position.col === defenderLeader.position.col)
+      )
+
+      const attackerStrength = countAdjacentTemples(state.board, position)
+      const defenderStrength = countAdjacentTemples(state.board, defenderLeader.position)
+
+      state.pendingConflict = {
+        type: 'revolt',
+        color,
+        attacker: { playerIndex: state.currentPlayer, position },
+        defender: { playerIndex: defenderPlayerIndex, position: defenderLeader.position },
+        attackerStrength,
+        defenderStrength,
+        attackerCommitted: null,
+        defenderCommitted: null,
+      }
+      state.turnPhase = 'conflictSupport'
+      return state
+    }
+  }
+
+  state.actionsRemaining -= 1
+  return state
+}
+
+function handleCommitSupport(state: GameState, indices: number[]): GameState {
+  if (state.turnPhase !== 'conflictSupport' || !state.pendingConflict) {
+    throw new Error('Not in conflict support phase')
+  }
+
+  const conflict = state.pendingConflict
+
+  // Determine who is committing
+  const isAttackerTurn = conflict.attackerCommitted === null
+  const committingPlayerIndex = isAttackerTurn
+    ? conflict.attacker.playerIndex
+    : conflict.defender.playerIndex
+  const player = state.players[committingPlayerIndex]
+
+  // Validate indices and tile colors
+  for (const idx of indices) {
+    if (idx < 0 || idx >= player.hand.length) {
+      throw new Error(`Invalid tile index: ${idx}`)
+    }
+    if (conflict.type === 'revolt' && player.hand[idx] !== 'red') {
+      throw new Error('Only red tiles can be committed during a revolt')
+    }
+  }
+
+  if (isAttackerTurn) {
+    conflict.attackerCommitted = indices
+    return state
+  } else {
+    conflict.defenderCommitted = indices
+    return resolveRevolt(state)
+  }
 }
