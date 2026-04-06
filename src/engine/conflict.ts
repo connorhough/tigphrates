@@ -1,5 +1,9 @@
-import { GameState, Position, LeaderColor, TileColor } from './types'
+import { GameState, Position, LeaderColor, TileColor, BOARD_ROWS, BOARD_COLS } from './types'
 import { getNeighbors, findKingdoms } from './board'
+
+// Reusable BFS buffers for conflict flood-fills
+const _cVis = new Uint8Array(BOARD_ROWS * BOARD_COLS)
+const _cQ = new Int32Array(BOARD_ROWS * BOARD_COLS)
 
 /**
  * Count face-up red temple tiles adjacent to the given position.
@@ -76,41 +80,75 @@ export function countWarSupportTiles(
   unificationTilePos: Position,
   opposingLeaderPos: Position,
 ): number {
-  const visited = new Set<string>()
-  const queue: Position[] = []
+  _cVis.fill(0)
+  let head = 0
+  let tail = 0
   let count = 0
 
-  // Start from the leader position — don't count the leader cell itself
-  const startKey = `${leaderPos.row},${leaderPos.col}`
-  visited.add(startKey)
-
-  // Also block the unification tile and opposing leader
-  visited.add(`${unificationTilePos.row},${unificationTilePos.col}`)
-  visited.add(`${opposingLeaderPos.row},${opposingLeaderPos.col}`)
+  // Block start, unification tile, and opposing leader
+  _cVis[leaderPos.row * BOARD_COLS + leaderPos.col] = 1
+  _cVis[unificationTilePos.row * BOARD_COLS + unificationTilePos.col] = 1
+  _cVis[opposingLeaderPos.row * BOARD_COLS + opposingLeaderPos.col] = 1
 
   // Seed with neighbors of the leader
-  for (const neighbor of getNeighbors(leaderPos)) {
-    const key = `${neighbor.row},${neighbor.col}`
-    if (visited.has(key)) continue
-    visited.add(key)
-    const cell = board[neighbor.row][neighbor.col]
+  for (const nb of getNeighbors(leaderPos)) {
+    const ni = nb.row * BOARD_COLS + nb.col
+    if (_cVis[ni]) continue
+    _cVis[ni] = 1
+    const cell = board[nb.row][nb.col]
     if (cell.tile !== null || cell.leader !== null) {
-      queue.push(neighbor)
+      _cQ[tail++] = ni
       if (cell.tile === warColor && !cell.tileFlipped) count++
     }
   }
 
-  // BFS flood fill
-  while (queue.length > 0) {
-    const pos = queue.shift()!
-    for (const neighbor of getNeighbors(pos)) {
-      const key = `${neighbor.row},${neighbor.col}`
-      if (visited.has(key)) continue
-      visited.add(key)
-      const cell = board[neighbor.row][neighbor.col]
-      if (cell.tile !== null || cell.leader !== null) {
-        queue.push(neighbor)
-        if (cell.tile === warColor && !cell.tileFlipped) count++
+  while (head < tail) {
+    const idx = _cQ[head++]
+    const r = (idx / BOARD_COLS) | 0
+    const c = idx % BOARD_COLS
+
+    if (r > 0) {
+      const ni = idx - BOARD_COLS
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r - 1][c]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) count++
+        }
+      }
+    }
+    if (r < BOARD_ROWS - 1) {
+      const ni = idx + BOARD_COLS
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r + 1][c]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) count++
+        }
+      }
+    }
+    if (c > 0) {
+      const ni = idx - 1
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r][c - 1]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) count++
+        }
+      }
+    }
+    if (c < BOARD_COLS - 1) {
+      const ni = idx + 1
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r][c + 1]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) count++
+        }
       }
     }
   }
@@ -234,36 +272,73 @@ function collectWarColorTiles(
   unificationTilePos: Position,
   winnerLeaderPos: Position,
 ): Position[] {
-  const visited = new Set<string>()
-  const queue: Position[] = []
+  _cVis.fill(0)
+  let head = 0
+  let tail = 0
   const result: Position[] = []
 
-  visited.add(`${loserLeaderPos.row},${loserLeaderPos.col}`)
-  visited.add(`${unificationTilePos.row},${unificationTilePos.col}`)
-  visited.add(`${winnerLeaderPos.row},${winnerLeaderPos.col}`)
+  _cVis[loserLeaderPos.row * BOARD_COLS + loserLeaderPos.col] = 1
+  _cVis[unificationTilePos.row * BOARD_COLS + unificationTilePos.col] = 1
+  _cVis[winnerLeaderPos.row * BOARD_COLS + winnerLeaderPos.col] = 1
 
-  // Seed with neighbors of the loser leader position
-  for (const neighbor of getNeighbors(loserLeaderPos)) {
-    const key = `${neighbor.row},${neighbor.col}`
-    if (visited.has(key)) continue
-    visited.add(key)
-    const cell = board[neighbor.row][neighbor.col]
+  for (const nb of getNeighbors(loserLeaderPos)) {
+    const ni = nb.row * BOARD_COLS + nb.col
+    if (_cVis[ni]) continue
+    _cVis[ni] = 1
+    const cell = board[nb.row][nb.col]
     if (cell.tile !== null || cell.leader !== null) {
-      queue.push(neighbor)
-      if (cell.tile === warColor && !cell.tileFlipped) result.push(neighbor)
+      _cQ[tail++] = ni
+      if (cell.tile === warColor && !cell.tileFlipped) result.push(nb)
     }
   }
 
-  while (queue.length > 0) {
-    const pos = queue.shift()!
-    for (const neighbor of getNeighbors(pos)) {
-      const key = `${neighbor.row},${neighbor.col}`
-      if (visited.has(key)) continue
-      visited.add(key)
-      const cell = board[neighbor.row][neighbor.col]
-      if (cell.tile !== null || cell.leader !== null) {
-        queue.push(neighbor)
-        if (cell.tile === warColor && !cell.tileFlipped) result.push(neighbor)
+  while (head < tail) {
+    const idx = _cQ[head++]
+    const r = (idx / BOARD_COLS) | 0
+    const c = idx % BOARD_COLS
+
+    if (r > 0) {
+      const ni = idx - BOARD_COLS
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r - 1][c]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) result.push({ row: r - 1, col: c })
+        }
+      }
+    }
+    if (r < BOARD_ROWS - 1) {
+      const ni = idx + BOARD_COLS
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r + 1][c]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) result.push({ row: r + 1, col: c })
+        }
+      }
+    }
+    if (c > 0) {
+      const ni = idx - 1
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r][c - 1]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) result.push({ row: r, col: c - 1 })
+        }
+      }
+    }
+    if (c < BOARD_COLS - 1) {
+      const ni = idx + 1
+      if (!_cVis[ni]) {
+        _cVis[ni] = 1
+        const cell = board[r][c + 1]
+        if (cell.tile !== null || cell.leader !== null) {
+          _cQ[tail++] = ni
+          if (cell.tile === warColor && !cell.tileFlipped) result.push({ row: r, col: c + 1 })
+        }
       }
     }
   }

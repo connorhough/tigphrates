@@ -19,58 +19,78 @@ function isOccupied(cell: Cell): boolean {
   return !cell.catastrophe && (cell.tile !== null || cell.leader !== null)
 }
 
-export function findConnectedGroup(board: Cell[][], start: Position): Position[] {
-  const startCell = board[start.row][start.col]
-  if (!isOccupied(startCell)) return []
+// Module-level reusable BFS buffers — avoids per-call allocations
+const _vis = new Uint8Array(BOARD_ROWS * BOARD_COLS)
+const _q = new Int32Array(BOARD_ROWS * BOARD_COLS)
 
-  const visited = new Set<string>()
+/**
+ * Internal BFS flood fill. Does NOT reset _vis — caller is responsible.
+ * Marks all reachable occupied cells starting from startIdx.
+ * Returns the group as Position[].
+ */
+function _bfs(board: Cell[][], startIdx: number): Position[] {
+  let head = 0
+  let tail = 0
+  _q[tail++] = startIdx
+  _vis[startIdx] = 1
   const group: Position[] = []
-  const queue: Position[] = [start]
-  visited.add(`${start.row},${start.col}`)
 
-  while (queue.length > 0) {
-    const pos = queue.shift()!
-    group.push(pos)
+  while (head < tail) {
+    const idx = _q[head++]
+    const r = (idx / BOARD_COLS) | 0
+    const c = idx % BOARD_COLS
+    group.push({ row: r, col: c })
 
-    for (const neighbor of getNeighbors(pos)) {
-      const key = `${neighbor.row},${neighbor.col}`
-      if (visited.has(key)) continue
-      visited.add(key)
-      const cell = board[neighbor.row][neighbor.col]
-      if (isOccupied(cell)) {
-        queue.push(neighbor)
-      }
+    // up
+    if (r > 0) {
+      const n = idx - BOARD_COLS
+      if (!_vis[n] && isOccupied(board[r - 1][c])) { _vis[n] = 1; _q[tail++] = n }
+    }
+    // down
+    if (r < BOARD_ROWS - 1) {
+      const n = idx + BOARD_COLS
+      if (!_vis[n] && isOccupied(board[r + 1][c])) { _vis[n] = 1; _q[tail++] = n }
+    }
+    // left
+    if (c > 0) {
+      const n = idx - 1
+      if (!_vis[n] && isOccupied(board[r][c - 1])) { _vis[n] = 1; _q[tail++] = n }
+    }
+    // right
+    if (c < BOARD_COLS - 1) {
+      const n = idx + 1
+      if (!_vis[n] && isOccupied(board[r][c + 1])) { _vis[n] = 1; _q[tail++] = n }
     }
   }
 
   return group
 }
 
+export function findConnectedGroup(board: Cell[][], start: Position): Position[] {
+  const startIdx = start.row * BOARD_COLS + start.col
+  if (!isOccupied(board[start.row][start.col])) return []
+  _vis.fill(0)
+  return _bfs(board, startIdx)
+}
+
 export function findKingdoms(board: Cell[][]): Kingdom[] {
-  const visited = new Set<string>()
+  _vis.fill(0)
   const kingdoms: Kingdom[] = []
 
   for (let row = 0; row < BOARD_ROWS; row++) {
     for (let col = 0; col < BOARD_COLS; col++) {
-      const key = `${row},${col}`
-      if (visited.has(key)) continue
-      const cell = board[row][col]
-      if (!isOccupied(cell)) continue
+      const idx = row * BOARD_COLS + col
+      if (_vis[idx]) continue
+      if (!isOccupied(board[row][col])) continue
 
-      const group = findConnectedGroup(board, { row, col })
-      for (const pos of group) {
-        visited.add(`${pos.row},${pos.col}`)
-      }
+      // _bfs marks all cells in this group in _vis
+      const group = _bfs(board, idx)
 
       const leaders: Kingdom['leaders'] = []
       for (const pos of group) {
-        const c = board[pos.row][pos.col]
-        if (c.leader) {
-          leaders.push({
-            color: c.leader.color,
-            dynasty: c.leader.dynasty,
-            position: pos,
-          })
+        const cell = board[pos.row][pos.col]
+        if (cell.leader) {
+          leaders.push({ color: cell.leader.color, dynasty: cell.leader.dynasty, position: pos })
         }
       }
 
@@ -84,25 +104,18 @@ export function findKingdoms(board: Cell[][]): Kingdom[] {
 }
 
 export function findRegions(board: Cell[][]): Position[][] {
-  const visited = new Set<string>()
+  _vis.fill(0)
   const regions: Position[][] = []
 
   for (let row = 0; row < BOARD_ROWS; row++) {
     for (let col = 0; col < BOARD_COLS; col++) {
-      const key = `${row},${col}`
-      if (visited.has(key)) continue
-      const cell = board[row][col]
-      if (!isOccupied(cell)) continue
+      const idx = row * BOARD_COLS + col
+      if (_vis[idx]) continue
+      if (!isOccupied(board[row][col])) continue
 
-      const group = findConnectedGroup(board, { row, col })
-      for (const pos of group) {
-        visited.add(`${pos.row},${pos.col}`)
-      }
+      const group = _bfs(board, idx)
 
-      const hasLeader = group.some(
-        (pos) => board[pos.row][pos.col].leader !== null
-      )
-
+      const hasLeader = group.some(pos => board[pos.row][pos.col].leader !== null)
       if (!hasLeader) {
         regions.push(group)
       }

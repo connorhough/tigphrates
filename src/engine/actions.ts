@@ -1,10 +1,82 @@
 import { GameState, GameAction, TileColor, LeaderColor, Position, BOARD_ROWS, BOARD_COLS } from './types'
+import type { ConflictState, Cell } from './types'
 import { findKingdoms, getNeighbors } from './board'
 import { countAdjacentTemples, resolveRevolt, resolveWar, setupWarConflict, withdrawStrandedLeaders } from './conflict'
 import { find2x2Square, getAvailableMonuments, buildMonument as buildMonumentFn } from './monument'
 
+function cloneCell(src: Cell): Cell {
+  return {
+    terrain: src.terrain,
+    tile: src.tile,
+    tileFlipped: src.tileFlipped,
+    leader: src.leader ? { color: src.leader.color, dynasty: src.leader.dynasty } : null,
+    catastrophe: src.catastrophe,
+    monument: src.monument,
+    hasTreasure: src.hasTreasure,
+  }
+}
+
+function cloneConflict(pc: ConflictState): ConflictState {
+  return {
+    type: pc.type,
+    color: pc.color,
+    attacker: { playerIndex: pc.attacker.playerIndex, position: { row: pc.attacker.position.row, col: pc.attacker.position.col } },
+    defender: { playerIndex: pc.defender.playerIndex, position: { row: pc.defender.position.row, col: pc.defender.position.col } },
+    attackerStrength: pc.attackerStrength,
+    defenderStrength: pc.defenderStrength,
+    attackerCommitted: pc.attackerCommitted ? [...pc.attackerCommitted] : null,
+    defenderCommitted: pc.defenderCommitted ? [...pc.defenderCommitted] : null,
+    pendingWarColors: pc.pendingWarColors ? [...pc.pendingWarColors] : undefined,
+    unificationTilePosition: pc.unificationTilePosition
+      ? { row: pc.unificationTilePosition.row, col: pc.unificationTilePosition.col }
+      : undefined,
+  }
+}
+
+function cloneState(state: GameState): GameState {
+  const board: Cell[][] = new Array(BOARD_ROWS)
+  for (let r = 0; r < BOARD_ROWS; r++) {
+    const srcRow = state.board[r]
+    const row: Cell[] = new Array(BOARD_COLS)
+    for (let c = 0; c < BOARD_COLS; c++) {
+      row[c] = cloneCell(srcRow[c])
+    }
+    board[r] = row
+  }
+
+  return {
+    board,
+    players: state.players.map(p => ({
+      dynasty: p.dynasty,
+      hand: [...p.hand],
+      leaders: p.leaders.map(l => ({
+        color: l.color,
+        position: l.position ? { row: l.position.row, col: l.position.col } : null,
+      })),
+      catastrophesRemaining: p.catastrophesRemaining,
+      score: { red: p.score.red, blue: p.score.blue, green: p.score.green, black: p.score.black },
+      treasures: p.treasures,
+      isAI: p.isAI,
+    })),
+    bag: [...state.bag],
+    monuments: state.monuments.map(m => ({
+      id: m.id,
+      color1: m.color1,
+      color2: m.color2,
+      position: m.position ? { row: m.position.row, col: m.position.col } : null,
+    })),
+    currentPlayer: state.currentPlayer,
+    actionsRemaining: state.actionsRemaining,
+    turnPhase: state.turnPhase,
+    pendingConflict: state.pendingConflict ? cloneConflict(state.pendingConflict) : null,
+    pendingMonument: state.pendingMonument
+      ? { position: { row: state.pendingMonument.position.row, col: state.pendingMonument.position.col }, color: state.pendingMonument.color }
+      : null,
+  }
+}
+
 export function applyAction(state: GameState, action: GameAction): GameState {
-  const next = structuredClone(state)
+  const next = cloneState(state)
 
   // Actions that consume a turn action require actionsRemaining > 0
   if (action.type === 'pass' || action.type === 'swapTiles' || action.type === 'withdrawLeader' || action.type === 'placeTile' || action.type === 'placeLeader' || action.type === 'placeCatastrophe') {
