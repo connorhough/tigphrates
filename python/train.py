@@ -25,12 +25,13 @@ from evaluate import TIME_BUDGET, EVAL_GAMES, PLAYER_COUNT, evaluate_vs_heuristi
 # PPO
 LEARNING_RATE = 3e-4
 GAMMA = 0.99              # discount factor
-GAE_LAMBDA = 0.98         # GAE lambda — increased for long-horizon games to reduce bias
+GAE_LAMBDA = 0.95         # GAE lambda — reverted to standard; 0.98 degraded performance
+PPO_EPOCHS = 8            # optimization epochs per rollout — doubled for better sample efficiency
 CLIP_EPS = 0.2            # PPO clipping epsilon
 ENTROPY_COEF = 0.01       # entropy bonus coefficient
 VALUE_COEF = 0.5          # value loss coefficient
 MAX_GRAD_NORM = 0.5       # gradient clipping
-PPO_EPOCHS = 4            # optimization epochs per rollout
+# PPO_EPOCHS moved above (set to 8)
 MINIBATCH_SIZE = 64       # minibatch size for PPO updates
 
 # Rollout
