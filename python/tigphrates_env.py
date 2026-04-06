@@ -128,6 +128,9 @@ class TigphratesEnv(gym.Env):
             "scores": spaces.Box(0, 200, shape=(4,), dtype=np.int32),
             "meta": spaces.Box(-1, 500, shape=(8,), dtype=np.float32),
             "conflict": spaces.Box(-1, 200, shape=(7,), dtype=np.float32),
+            "leaders": spaces.Box(-1, 16, shape=(8,), dtype=np.float32),
+            "opp_scores": spaces.Box(0, 200, shape=(4,), dtype=np.float32),
+            "opp_leaders": spaces.Box(-1, 16, shape=(8,), dtype=np.float32),
         })
 
         self._bridge: BridgeProcess | None = None
@@ -260,12 +263,31 @@ class TigphratesEnv(gym.Env):
         else:
             conflict = np.zeros(7, dtype=np.float32)
 
+        # Own leader positions (4 leaders × row,col)
+        leader_pos = np.array(raw["leaderPositions"], dtype=np.float32)
+
+        # Opponent scores and leader positions (first opponent for 2p)
+        opp_scores_raw = raw.get("opponentScores", [])
+        if opp_scores_raw:
+            opp_scores = np.array(opp_scores_raw[0], dtype=np.float32)
+        else:
+            opp_scores = np.zeros(4, dtype=np.float32)
+
+        opp_leaders_raw = raw.get("opponentLeaderPositions", [])
+        if opp_leaders_raw:
+            opp_leaders = np.array(opp_leaders_raw[0], dtype=np.float32)
+        else:
+            opp_leaders = np.full(8, -1.0, dtype=np.float32)
+
         return {
             "board": board,
             "hand": hand,
             "scores": scores,
             "meta": meta,
             "conflict": conflict,
+            "leaders": leader_pos,
+            "opp_scores": opp_scores,
+            "opp_leaders": opp_leaders,
         }
 
     def close(self):
