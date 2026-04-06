@@ -1,6 +1,6 @@
 import { getAIAction } from '../simpleAI'
 import { createGame } from '../../engine/setup'
-import { GameState, ConflictState, TileColor, LeaderColor } from '../../engine/types'
+import { GameState } from '../../engine/types'
 
 function freshAIState(): GameState {
   const state = createGame(2, [false, true])

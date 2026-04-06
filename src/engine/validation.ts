@@ -1,5 +1,5 @@
 import { GameState, Position, TileColor, BOARD_ROWS, BOARD_COLS } from './types'
-import { getNeighbors, findKingdoms, Kingdom } from './board'
+import { getNeighbors, findKingdoms } from './board'
 
 export function getValidTilePlacements(state: GameState, color: TileColor): Position[] {
   const validPositions: Position[] = []
@@ -45,7 +45,7 @@ function wouldUniteThreeOrMoreKingdoms(state: GameState, pos: Position): boolean
   return adjacentKingdomIndices.size >= 3
 }
 
-export function getValidLeaderPlacements(state: GameState, color: string): Position[] {
+export function getValidLeaderPlacements(state: GameState, _color: string): Position[] {
   const validPositions: Position[] = []
 
   for (let row = 0; row < BOARD_ROWS; row++) {

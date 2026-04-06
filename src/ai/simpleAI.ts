@@ -1,8 +1,7 @@
-import { GameState, GameAction, TileColor, LeaderColor, Position } from '../engine/types'
+import { GameState, GameAction, TileColor, Position } from '../engine/types'
 import { getValidTilePlacements, getValidLeaderPlacements } from '../engine/validation'
 import { findKingdoms } from '../engine/board'
 
-const LEADER_COLORS: LeaderColor[] = ['red', 'blue', 'green', 'black']
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 
 export function getAIAction(state: GameState): GameAction {

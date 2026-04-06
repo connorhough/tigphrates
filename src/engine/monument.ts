@@ -1,5 +1,5 @@
 import { GameState, Position, TileColor, Monument, MonumentId, Cell, BOARD_ROWS, BOARD_COLS } from './types'
-import { getNeighbors, findKingdoms } from './board'
+import { findKingdoms } from './board'
 import { withdrawStrandedLeaders } from './conflict'
 
 /**

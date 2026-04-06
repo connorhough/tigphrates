@@ -1,5 +1,5 @@
 import { getNeighbors, findConnectedGroup, findKingdoms, findRegions } from '../board'
-import { createInitialBoard, Cell, BOARD_ROWS, BOARD_COLS } from '../types'
+import { createInitialBoard } from '../types'
 
 describe('getNeighbors', () => {
   it('returns 4 neighbors for center cell', () => {

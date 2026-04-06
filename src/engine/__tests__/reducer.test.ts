@@ -1,10 +1,5 @@
 import { createGame } from '../setup'
 import { gameReducer } from '../reducer'
-import { GameState } from '../types'
-
-function makeAction(state: GameState, playerIndex: number) {
-  return { playerIndex }
-}
 
 describe('gameReducer', () => {
   it('rejects actions from wrong player', () => {

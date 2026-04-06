@@ -1,5 +1,5 @@
 import { createGame } from '../setup'
-import { GameState, TileColor } from '../types'
+import { GameState } from '../types'
 import { endTurn, collectTreasures, checkGameEnd, calculateFinalScores } from '../turn'
 
 const STARTING_TEMPLES: [number, number][] = [
@@ -13,14 +13,6 @@ function placeLeaderOnBoard(state: GameState, playerIndex: number, color: string
   state.board[row][col].leader = { color: color as any, dynasty: player.dynasty }
 }
 
-function clearCell(board: GameState['board'], row: number, col: number) {
-  board[row][col].tile = null
-  board[row][col].tileFlipped = false
-  board[row][col].leader = null
-  board[row][col].catastrophe = false
-  board[row][col].monument = null
-  board[row][col].hasTreasure = false
-}
 
 describe('turn flow', () => {
   it('draws tiles to refill hand to 6', () => {

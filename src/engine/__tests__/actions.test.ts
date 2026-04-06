@@ -4,7 +4,6 @@ import { applyAction } from '../actions'
 describe('swapTiles', () => {
   it('removes selected tiles and draws replacements', () => {
     const state = createGame(2)
-    const handBefore = [...state.players[0].hand]
     const result = applyAction(state, { type: 'swapTiles', indices: [0, 1] })
     expect(result.players[0].hand).toHaveLength(6)
     expect(result.actionsRemaining).toBe(1)

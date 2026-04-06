@@ -1,5 +1,5 @@
 import { createGame } from '../setup'
-import { createInitialBoard, GameState, Position } from '../types'
+import { Position } from '../types'
 import {
   getValidTilePlacements,
   getValidLeaderPlacements,
