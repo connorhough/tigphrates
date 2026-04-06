@@ -32,7 +32,7 @@ ENTROPY_COEF = 0.01       # entropy bonus coefficient
 VALUE_COEF = 0.5          # value loss coefficient
 MAX_GRAD_NORM = 0.5       # gradient clipping
 # PPO_EPOCHS moved above (set to 8)
-MINIBATCH_SIZE = 64       # minibatch size for PPO updates
+MINIBATCH_SIZE = 256      # minibatch size for PPO updates — larger batches stabilize gradient estimates
 
 # Rollout
 ROLLOUT_STEPS = 1024      # steps per rollout before update — larger for sparse-reward long games
