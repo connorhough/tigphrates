@@ -44,7 +44,7 @@ SCORE_AVG_WEIGHT = 0.5    # blend: 0=min-score only, 1=avg-score only (avg encou
 
 # Architecture
 BOARD_CONV_CHANNELS = 32  # channels in board CNN
-HIDDEN_DIM = 128          # MLP hidden dimension
+HIDDEN_DIM = 256          # MLP hidden dimension — doubled to increase policy capacity for complex game state
 NUM_HIDDEN_LAYERS = 2     # number of hidden layers in MLP head
 
 # ---------------------------------------------------------------------------
