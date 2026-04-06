@@ -1,6 +1,7 @@
-import { GameState, GameAction, TileColor, Position } from '../engine/types'
+import { GameState, GameAction, TileColor, LeaderColor, Position } from '../engine/types'
 import { getValidTilePlacements, getValidLeaderPlacements } from '../engine/validation'
-import { findKingdoms } from '../engine/board'
+import { findKingdoms, getNeighbors } from '../engine/board'
+import { countAdjacentTemples } from '../engine/conflict'
 
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 
@@ -154,6 +155,34 @@ function handleActionPhase(state: GameState): GameAction {
   return { type: 'pass' }
 }
 
+/**
+ * Returns the position of a same-color enemy leader in a kingdom that the given
+ * placement would join, or null if no revolt would be triggered.
+ */
+function findRevoltDefender(
+  state: GameState,
+  color: LeaderColor,
+  placementPos: Position,
+): Position | null {
+  const kingdoms = findKingdoms(state.board)
+  const playerLeaderDynasty = state.players[state.currentPlayer].dynasty
+
+  // Which kingdoms are adjacent to this placement?
+  const neighbors = getNeighbors(placementPos)
+  for (const kingdom of kingdoms) {
+    const posSet = new Set(kingdom.positions.map(p => `${p.row},${p.col}`))
+    const isAdjacent = neighbors.some(n => posSet.has(`${n.row},${n.col}`))
+    if (!isAdjacent) continue
+
+    // Does this kingdom have a same-color leader from a different dynasty?
+    const conflictLeader = kingdom.leaders.find(
+      l => l.color === color && l.dynasty !== playerLeaderDynasty,
+    )
+    if (conflictLeader?.position) return conflictLeader.position
+  }
+  return null
+}
+
 function tryPlaceLeader(
   state: GameState,
   player: GameState['players'][number],
@@ -171,9 +200,18 @@ function tryPlaceLeader(
 
   for (const leader of offBoardLeaders) {
     const validPlacements = getValidLeaderPlacements(state, leader.color)
-    if (validPlacements.length > 0) {
-      // Pick first valid placement
-      return { type: 'placeLeader', color: leader.color, position: validPlacements[0] }
+
+    for (const pos of validPlacements) {
+      const defenderPos = findRevoltDefender(state, leader.color, pos)
+      if (defenderPos !== null) {
+        // Revolt would be triggered — only proceed if we can win
+        const myStrength = countAdjacentTemples(state.board, pos)
+        const defenderStrength = countAdjacentTemples(state.board, defenderPos)
+        const myRedTiles = player.hand.filter(t => t === 'red').length
+        // Defender wins ties, so we need strict majority
+        if (myStrength + myRedTiles <= defenderStrength) continue
+      }
+      return { type: 'placeLeader', color: leader.color, position: pos }
     }
   }
 
