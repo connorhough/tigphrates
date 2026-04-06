@@ -1,16 +1,101 @@
-import { GameState, GameAction } from '../engine/types'
+import { GameState, GameAction, TileColor, TurnPhase } from '../engine/types'
 import { createGame } from '../engine/setup'
 import { gameReducer } from '../engine/reducer'
 import { getAIAction } from '../ai/simpleAI'
 
-export interface GameResult {
-  winner: number // player index with highest minimum score
-  scores: { dynasty: string; minScore: number; score: Record<string, number>; treasures: number }[]
-  turnCount: number
-  reason: 'gameOver' | 'maxTurns'
+// --- Compact log notation ---
+// Colors: R=red B=blue G=green K=black
+// Actions: T=placeTile L=placeLeader W=withdraw C=catastrophe S=swap P=pass
+//          CS=commitSupport WO=warOrder BM=buildMonument DM=declineMonument
+// Positions: row.col (e.g. 3.5)
+// Score deltas: +1R +2B etc.
+// Turn header: === T<n> P<n>(<dynasty>) === (with hand summary)
+// Conflicts: REVOLT or WAR with attacker/defender/result
+// Fallback actions marked with !fb
+
+const C: Record<string, string> = { red: 'R', blue: 'B', green: 'G', black: 'K' }
+
+function pos(r: number, c: number): string { return `${r}.${c}` }
+
+function handSummary(hand: TileColor[]): string {
+  const counts: Record<string, number> = {}
+  for (const t of hand) counts[C[t]] = (counts[C[t]] || 0) + 1
+  return Object.entries(counts).map(([c, n]) => `${n}${c}`).join('') || '(empty)'
 }
 
-const DEFAULT_MAX_ACTIONS = 5000 // safety limit to prevent infinite loops
+function scoreDelta(
+  before: Record<TileColor, number>,
+  after: Record<TileColor, number>,
+): string {
+  const parts: string[] = []
+  for (const color of ['red', 'blue', 'green', 'black'] as TileColor[]) {
+    const diff = after[color] - before[color]
+    if (diff > 0) parts.push(`+${diff}${C[color]}`)
+  }
+  return parts.join(' ')
+}
+
+function treasureDelta(before: number, after: number): string {
+  const diff = after - before
+  return diff > 0 ? ` +${diff}tr` : ''
+}
+
+function scoreSnapshot(players: GameState['players']): string {
+  return players.map((p, i) =>
+    `P${i + 1}[${C.red}${p.score.red} ${C.blue}${p.score.blue} ${C.green}${p.score.green} ${C.black}${p.score.black} tr${p.treasures}]`,
+  ).join(' ')
+}
+
+function formatAction(action: GameAction): string {
+  switch (action.type) {
+    case 'placeTile': return `T:${C[action.color]}@${pos(action.position.row, action.position.col)}`
+    case 'placeLeader': return `L:${C[action.color]}@${pos(action.position.row, action.position.col)}`
+    case 'withdrawLeader': return `W:${C[action.color]}`
+    case 'placeCatastrophe': return `C@${pos(action.position.row, action.position.col)}`
+    case 'swapTiles': return `S(${action.indices.length})`
+    case 'pass': return 'P'
+    case 'commitSupport': return `CS(${action.indices.length})`
+    case 'chooseWarOrder': return `WO:${C[action.color]}`
+    case 'buildMonument': return `BM:${action.monumentId}`
+    case 'declineMonument': return 'DM'
+    default: return '??'
+  }
+}
+
+function conflictLine(prev: GameState, next: GameState): string | null {
+  // Conflict just resolved: prev had pendingConflict, next doesn't (or has a different one)
+  const pc = prev.pendingConflict
+  if (!pc) return null
+  // Only log when conflict resolves (both sides committed and result applied)
+  if (next.pendingConflict === pc) return null
+  if (pc.attackerCommitted === null || pc.defenderCommitted === null) return null
+
+  const type = pc.type === 'revolt' ? 'REVOLT' : 'WAR'
+  const atkTotal = pc.attackerStrength + pc.attackerCommitted.length
+  const defTotal = pc.defenderStrength + pc.defenderCommitted.length
+  const winner = atkTotal > defTotal ? 'atk' : 'def'
+  return `  ${type}(${C[pc.color]}) P${pc.attacker.playerIndex + 1}(${atkTotal}) vs P${pc.defender.playerIndex + 1}(${defTotal}) -> ${winner} wins`
+}
+
+// --- Core types ---
+
+export interface GameResult {
+  winner: number
+  scores: { dynasty: string; minScore: number; score: Record<string, number>; treasures: number }[]
+  turnCount: number
+  turns: number
+  reason: 'gameOver' | 'maxTurns' | 'turnLimit'
+  log: string[]
+}
+
+export interface RunOptions {
+  playerCount: number
+  maxActions?: number
+  maxTurns?: number
+  log?: boolean
+}
+
+const DEFAULT_MAX_ACTIONS = 5000
 
 /**
  * Determine which player's turn it is for the current game phase.
@@ -27,33 +112,111 @@ function activePlayer(state: GameState): number {
 
 /**
  * Run a single game with all AI players to completion.
- * Returns the game result with scores and winner.
  */
-export function runGame(playerCount: number, maxActions = DEFAULT_MAX_ACTIONS): GameResult {
+export function runGame(playerCountOrOpts: number | RunOptions, maxActions?: number): GameResult {
+  const opts: RunOptions = typeof playerCountOrOpts === 'number'
+    ? { playerCount: playerCountOrOpts, maxActions, log: true }
+    : playerCountOrOpts
+  const playerCount = opts.playerCount
+  const actionLimit = opts.maxActions ?? DEFAULT_MAX_ACTIONS
+  const turnLimit = opts.maxTurns ?? Infinity
+  const logging = opts.log !== false
+
   const aiFlags = new Array(playerCount).fill(true)
   let state = createGame(playerCount, aiFlags)
   let actionCount = 0
+  let turnNumber = 0
+  let lastTurnPlayer = -1
+  const log: string[] = []
+  const SNAPSHOT_INTERVAL = 10 // score snapshot every N turns
 
-  while (state.turnPhase !== 'gameOver' && actionCount < maxActions) {
+  // Log initial state
+  if (logging) {
+    log.push(`GAME ${playerCount}p | bag=${state.bag.length}`)
+    for (let i = 0; i < playerCount; i++) {
+      const p = state.players[i]
+      log.push(`  P${i + 1}(${p.dynasty}) hand=${handSummary(p.hand)}`)
+    }
+  }
+
+  while (state.turnPhase !== 'gameOver' && actionCount < actionLimit) {
+    // Detect turn transitions
+    const cp = state.currentPlayer
+    if (state.turnPhase === 'action' && state.actionsRemaining === 2 && cp !== lastTurnPlayer) {
+      if (cp <= lastTurnPlayer || lastTurnPlayer === -1) turnNumber++
+      lastTurnPlayer = cp
+
+      if (turnNumber > turnLimit) break
+
+      if (logging) {
+        const p = state.players[cp]
+        log.push(`=== T${turnNumber} P${cp + 1}(${p.dynasty}) hand=${handSummary(p.hand)} bag=${state.bag.length} ===`)
+        if (turnNumber > 0 && turnNumber % SNAPSHOT_INTERVAL === 0) {
+          log.push(`  SCORES: ${scoreSnapshot(state.players)}`)
+        }
+      }
+    }
+
     const playerIndex = activePlayer(state)
     const action: GameAction = getAIAction(state)
+    const prevState = state
+    let fallback = false
 
     try {
       state = gameReducer(state, { ...action, playerIndex })
     } catch {
-      // If action fails, try passing (only valid in action phase)
+      fallback = true
       if (state.turnPhase === 'action') {
         state = gameReducer(state, { type: 'pass', playerIndex })
       } else {
-        // For non-action phases, try empty commit or decline
         state = handleFallback(state, playerIndex)
       }
+    }
+
+    if (logging) {
+      // Log the action
+      const actionStr = fallback
+        ? `${formatAction(action)}!fb`
+        : formatAction(action)
+
+      // Detect score/treasure changes for all players
+      const deltas: string[] = []
+      for (let i = 0; i < playerCount; i++) {
+        const sd = scoreDelta(prevState.players[i].score, state.players[i].score)
+        const td = treasureDelta(prevState.players[i].treasures, state.players[i].treasures)
+        if (sd || td) deltas.push(`P${i + 1}:${sd}${td}`)
+      }
+      const deltaStr = deltas.length ? ` [${deltas.join(', ')}]` : ''
+
+      // Phase transition info
+      let phaseStr = ''
+      if (state.turnPhase !== prevState.turnPhase && state.turnPhase !== 'action') {
+        phaseStr = ` ->${state.turnPhase}`
+      }
+
+      log.push(`  ${actionStr}${deltaStr}${phaseStr}`)
+
+      // Log conflict resolution
+      const cLine = conflictLine(prevState, state)
+      if (cLine) log.push(cLine)
     }
 
     actionCount++
   }
 
-  return buildResult(state, actionCount, state.turnPhase === 'gameOver' ? 'gameOver' : 'maxTurns')
+  // Determine reason
+  let reason: GameResult['reason']
+  if (state.turnPhase === 'gameOver') reason = 'gameOver'
+  else if (turnNumber > turnLimit) reason = 'turnLimit'
+  else reason = 'maxTurns'
+
+  // Final score snapshot
+  if (logging) {
+    log.push(`--- END: ${reason} after ${turnNumber} turns, ${actionCount} actions ---`)
+    log.push(`FINAL: ${scoreSnapshot(state.players)}`)
+  }
+
+  return buildResult(state, actionCount, turnNumber, reason, log)
 }
 
 function handleFallback(state: GameState, playerIndex: number): GameState {
@@ -71,7 +234,13 @@ function handleFallback(state: GameState, playerIndex: number): GameState {
   }
 }
 
-function buildResult(state: GameState, actionCount: number, reason: GameResult['reason']): GameResult {
+function buildResult(
+  state: GameState,
+  actionCount: number,
+  turns: number,
+  reason: GameResult['reason'],
+  log: string[],
+): GameResult {
   const scores = state.players.map(p => ({
     dynasty: p.dynasty,
     minScore: Math.min(p.score.red, p.score.blue, p.score.green, p.score.black),
@@ -79,7 +248,6 @@ function buildResult(state: GameState, actionCount: number, reason: GameResult['
     treasures: p.treasures,
   }))
 
-  // Winner is the player with the highest minimum score (ties broken by treasures, then total)
   let winner = 0
   for (let i = 1; i < scores.length; i++) {
     const current = scores[i]
@@ -94,10 +262,7 @@ function buildResult(state: GameState, actionCount: number, reason: GameResult['
     }
   }
 
-  // Approximate turns from action count (rough: 2 actions per turn per player)
-  const turnCount = actionCount
-
-  return { winner, scores, turnCount, reason }
+  return { winner, scores, turnCount: actionCount, turns, reason, log }
 }
 
 function totalScore(score: Record<string, number>): number {
@@ -117,7 +282,7 @@ export function runTournament(
   const totalMinScores = new Array(playerCount).fill(0)
 
   for (let i = 0; i < gameCount; i++) {
-    const result = runGame(playerCount, maxActions)
+    const result = runGame({ playerCount, maxActions, log: false })
     results.push(result)
     wins[result.winner]++
     for (let p = 0; p < playerCount; p++) {
