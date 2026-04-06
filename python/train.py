@@ -25,7 +25,7 @@ from evaluate import TIME_BUDGET, EVAL_GAMES, PLAYER_COUNT, evaluate_vs_heuristi
 # PPO
 LEARNING_RATE = 3e-4
 GAMMA = 0.99              # discount factor
-GAE_LAMBDA = 0.95         # GAE lambda
+GAE_LAMBDA = 0.98         # GAE lambda — increased for long-horizon games to reduce bias
 CLIP_EPS = 0.2            # PPO clipping epsilon
 ENTROPY_COEF = 0.01       # entropy bonus coefficient
 VALUE_COEF = 0.5          # value loss coefficient
