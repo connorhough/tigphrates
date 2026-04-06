@@ -5,22 +5,52 @@
 # what to change in train.py next.
 #
 # Usage:
-#   ./python/run_experiments.sh [--tag TAG] [--max-runs N]
+#   ./python/run_experiments.sh [--dry-run] [TAG] [MAX_RUNS]
 #
 # Requires: python3, npx, git, claude (Claude Code CLI)
 #
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-TAG="${1:---tag}"
-if [[ "$TAG" == "--tag" ]]; then
+DRY_RUN=false
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    *) POSITIONAL+=("$arg") ;;
+  esac
+done
+
+TAG="${POSITIONAL[0]:-}"
+if [[ -z "$TAG" ]]; then
   TAG=$(date +%b%d | tr '[:upper:]' '[:lower:]')
 fi
-MAX_RUNS="${2:-999}"
+MAX_RUNS="${POSITIONAL[1]:-999}"
 BRANCH="autoresearch/${TAG}"
 TSV="results.tsv"
 LOG="run.log"
 TIMEOUT=720  # 12 min kill timeout
+
+if $DRY_RUN; then
+  export TIME_BUDGET=5
+  export EVAL_GAMES=2
+  TIMEOUT=30
+  echo "*** DRY RUN: TIME_BUDGET=${TIME_BUDGET}s, EVAL_GAMES=${EVAL_GAMES}, TIMEOUT=${TIMEOUT}s ***"
+fi
+
+# macOS-compatible timeout wrapper (coreutils `timeout` not available by default)
+run_with_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local pid=$!
+  ( sleep "$secs" && kill "$pid" 2>/dev/null ) &
+  local watcher=$!
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  kill "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null
+  return $rc
+}
 
 # --- Setup ---
 if ! git rev-parse --verify "$BRANCH" &>/dev/null; then
@@ -38,7 +68,7 @@ best_win_rate="0.000000"
 # --- Helper: run one experiment ---
 run_experiment() {
   echo ">>> Running training (5 min budget)..."
-  timeout "$TIMEOUT" python3 python/train.py > "$LOG" 2>&1
+  run_with_timeout "$TIMEOUT" python3 python/train.py > "$LOG" 2>&1
   return $?
 }
 
@@ -55,16 +85,22 @@ log_result() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$commit" "$wr" "$ms" "$status" "$desc" >> "$TSV"
 }
 
+# --- Helper: discard last experiment (revert only train.py, not whole tree) ---
+discard_last_experiment() {
+  git checkout HEAD~1 -- python/train.py
+  git reset HEAD~1 --soft
+  git checkout HEAD -- python/train.py
+}
+
 # --- Helper: ask Claude for next experiment ---
 ask_claude_for_edit() {
-  local results_context best_wr current_train
+  local results_context best_wr
   results_context=$(cat "$TSV")
   best_wr="$best_win_rate"
-  current_train=$(cat python/train.py)
 
   # Minimal, stateless prompt — only what Claude needs to decide
-  claude --print -m claude-sonnet-4-6 --allowedTools Edit,Read,Bash,Grep,Glob -p "$(cat <<PROMPT
-You are an autonomous RL researcher. Modify python/train.py with ONE experimental idea.
+  local prompt
+  prompt="You are an autonomous RL researcher. Modify python/train.py with ONE experimental idea.
 
 RULES:
 - Edit ONLY python/train.py. No other files.
@@ -75,15 +111,13 @@ RULES:
 - Be terse. No explanation needed. Just make the edit.
 
 RESULTS SO FAR:
-\`\`\`
 ${results_context}
-\`\`\`
 
 Best win_rate: ${best_wr}
 
-Current train.py is at python/train.py — read it, then edit with your idea.
-PROMPT
-)"
+Current train.py is at python/train.py — read it, then edit with your idea."
+
+  claude --print --model claude-sonnet-4-6 --allowedTools Edit,Read,Bash,Grep,Glob -p "$prompt"
 }
 
 # --- Main loop ---
@@ -129,7 +163,7 @@ for ((run=1; run<=MAX_RUNS; run++)); do
       echo ">>> CRASH (no results in log)"
       tail -20 "$LOG"
       log_result "$commit" "0.000000" "0.0" "crash" "crashed: ${desc}"
-      git reset --hard HEAD~1
+      discard_last_experiment
     else
       echo ">>> Results: win_rate=${wr} avg_min_score=${ms}"
 
@@ -142,14 +176,14 @@ for ((run=1; run<=MAX_RUNS; run++)); do
       else
         echo ">>> No improvement (${wr} <= ${best_win_rate}). Discarding."
         log_result "$commit" "$wr" "$ms" "discard" "$desc"
-        git reset --hard HEAD~1
+        discard_last_experiment
       fi
     fi
   else
     echo ">>> TIMEOUT or crash (exit code $?)"
     tail -20 "$LOG" 2>/dev/null || true
     log_result "$commit" "0.000000" "0.0" "crash" "timeout/crash: ${desc}"
-    git reset --hard HEAD~1
+    discard_last_experiment
   fi
 
   echo ""
