@@ -38,7 +38,7 @@ ROLLOUT_STEPS = 1024      # steps per rollout before update — larger for spars
 MAX_EPISODE_STEPS = 2000  # max steps per episode
 
 # Reward shaping
-SCORE_DELTA_COEF = 0.5    # weight on per-step score delta — boosted to dominate over near-zero discounted terminal
+SCORE_DELTA_COEF = 1.5    # weight on per-step score delta — further boosted to amplify learning signal
 SCORE_AVG_WEIGHT = 0.5    # blend: 0=min-score only, 1=avg-score only (avg encourages any scoring, min aligns with objective)
 
 # Architecture
