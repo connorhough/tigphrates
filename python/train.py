@@ -38,7 +38,8 @@ ROLLOUT_STEPS = 1024      # steps per rollout before update — larger for spars
 MAX_EPISODE_STEPS = 2000  # max steps per episode
 
 # Reward shaping
-SCORE_DELTA_COEF = 0.1    # weight on per-step min-score delta to densify sparse reward
+SCORE_DELTA_COEF = 0.5    # weight on per-step score delta — boosted to dominate over near-zero discounted terminal
+SCORE_AVG_WEIGHT = 0.5    # blend: 0=min-score only, 1=avg-score only (avg encourages any scoring, min aligns with objective)
 
 # Architecture
 BOARD_CONV_CHANNELS = 32  # channels in board CNN
@@ -213,15 +214,22 @@ def collect_rollout(env, model, rollout_steps):
         value_list.append(value.item())
         mask_list.append(action_mask)
 
-        # Record min-score before step for reward shaping
-        prev_min_score = float(np.min(obs["scores"][:4]))
+        # Record score before step for reward shaping
+        prev_scores = obs["scores"][:4]
+        prev_min_score = float(np.min(prev_scores))
+        prev_avg_score = float(np.mean(prev_scores))
 
         obs, reward, terminated, truncated, info = env.step(action.item())
         done = terminated or truncated
 
-        # Dense reward: add scaled delta in our min VP score each step
-        new_min_score = float(np.min(obs["scores"][:4]))
-        reward = reward + SCORE_DELTA_COEF * (new_min_score - prev_min_score)
+        # Dense reward: blend of min-score delta (aligns with objective) and avg-score delta (rewards any scoring)
+        new_scores = obs["scores"][:4]
+        new_min_score = float(np.min(new_scores))
+        new_avg_score = float(np.mean(new_scores))
+        min_delta = new_min_score - prev_min_score
+        avg_delta = new_avg_score - prev_avg_score
+        blended_delta = (1.0 - SCORE_AVG_WEIGHT) * min_delta + SCORE_AVG_WEIGHT * avg_delta
+        reward = reward + SCORE_DELTA_COEF * blended_delta
 
         reward_list.append(reward)
         done_list.append(float(done))
