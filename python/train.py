@@ -26,7 +26,7 @@ from evaluate import TIME_BUDGET, EVAL_GAMES, PLAYER_COUNT, evaluate_vs_heuristi
 LEARNING_RATE = 3e-4
 GAMMA = 0.99              # discount factor
 GAE_LAMBDA = 0.95         # GAE lambda — reverted to standard; 0.98 degraded performance
-PPO_EPOCHS = 8            # optimization epochs per rollout — doubled for better sample efficiency
+PPO_EPOCHS = 4            # optimization epochs per rollout — halved to reduce policy overfitting per batch
 CLIP_EPS = 0.2            # PPO clipping epsilon
 ENTROPY_COEF = 0.01       # entropy bonus coefficient
 VALUE_COEF = 0.5          # value loss coefficient
