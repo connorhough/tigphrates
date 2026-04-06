@@ -34,8 +34,11 @@ PPO_EPOCHS = 4            # optimization epochs per rollout
 MINIBATCH_SIZE = 64       # minibatch size for PPO updates
 
 # Rollout
-ROLLOUT_STEPS = 128       # steps per rollout before update
+ROLLOUT_STEPS = 1024      # steps per rollout before update — larger for sparse-reward long games
 MAX_EPISODE_STEPS = 2000  # max steps per episode
+
+# Reward shaping
+SCORE_DELTA_COEF = 0.1    # weight on per-step min-score delta to densify sparse reward
 
 # Architecture
 BOARD_CONV_CHANNELS = 32  # channels in board CNN
@@ -210,8 +213,15 @@ def collect_rollout(env, model, rollout_steps):
         value_list.append(value.item())
         mask_list.append(action_mask)
 
+        # Record min-score before step for reward shaping
+        prev_min_score = float(np.min(obs["scores"][:4]))
+
         obs, reward, terminated, truncated, info = env.step(action.item())
         done = terminated or truncated
+
+        # Dense reward: add scaled delta in our min VP score each step
+        new_min_score = float(np.min(obs["scores"][:4]))
+        reward = reward + SCORE_DELTA_COEF * (new_min_score - prev_min_score)
 
         reward_list.append(reward)
         done_list.append(float(done))
