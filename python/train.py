@@ -41,6 +41,7 @@ MAX_EPISODE_STEPS = 2000  # max steps per episode
 # Reward shaping
 SCORE_DELTA_COEF = 1.5    # weight on per-step score delta — further boosted to amplify learning signal
 SCORE_AVG_WEIGHT = 0.5    # blend: 0=min-score only, 1=avg-score only (avg encourages any scoring, min aligns with objective)
+MARGIN_DELTA_COEF = 1.0   # weight on per-step margin delta (my_min - opp_min) — rewards relative improvement
 
 # Architecture
 BOARD_CONV_CHANNELS = 32  # channels in board CNN
@@ -72,8 +73,8 @@ class PolicyValueNetwork(nn.Module):
         super().__init__()
         self.board_encoder = BoardEncoder()
 
-        # Extra features: hand(4) + scores(4) + meta(8) + conflict(7) = 23
-        extra_dim = 4 + 4 + 8 + 7
+        # Extra features: hand(4) + scores(4) + meta(8) + conflict(7) + leaders(8) + opp_scores(4) + opp_leaders(8) = 43
+        extra_dim = 4 + 4 + 8 + 7 + 8 + 4 + 8
         trunk_input_dim = self.board_encoder.out_dim + extra_dim
 
         # Shared trunk
@@ -105,14 +106,17 @@ class PolicyValueNetwork(nn.Module):
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
 
     def forward(self, obs):
-        board = obs["board"]       # (B, 13, 11, 16)
-        hand = obs["hand"]         # (B, 4)
-        scores = obs["scores"]     # (B, 4)
-        meta = obs["meta"]         # (B, 8)
-        conflict = obs["conflict"] # (B, 7)
+        board = obs["board"]           # (B, 13, 11, 16)
+        hand = obs["hand"]             # (B, 4)
+        scores = obs["scores"]         # (B, 4)
+        meta = obs["meta"]             # (B, 8)
+        conflict = obs["conflict"]     # (B, 7)
+        leaders = obs["leaders"]       # (B, 8)
+        opp_scores = obs["opp_scores"] # (B, 4)
+        opp_leaders = obs["opp_leaders"] # (B, 8)
 
         board_features = self.board_encoder(board)
-        extra = torch.cat([hand, scores, meta, conflict], dim=-1)
+        extra = torch.cat([hand, scores, meta, conflict, leaders, opp_scores, opp_leaders], dim=-1)
         combined = torch.cat([board_features, extra], dim=-1)
 
         trunk_out = self.trunk(combined)
@@ -146,6 +150,9 @@ def obs_to_tensors(obs):
         "scores": torch.tensor(obs["scores"], dtype=torch.float32).unsqueeze(0),
         "meta": torch.tensor(obs["meta"], dtype=torch.float32).unsqueeze(0),
         "conflict": torch.tensor(obs["conflict"], dtype=torch.float32).unsqueeze(0),
+        "leaders": torch.tensor(obs["leaders"], dtype=torch.float32).unsqueeze(0),
+        "opp_scores": torch.tensor(obs["opp_scores"], dtype=torch.float32).unsqueeze(0),
+        "opp_leaders": torch.tensor(obs["opp_leaders"], dtype=torch.float32).unsqueeze(0),
     }
 
 def stack_obs(obs_list):
@@ -156,6 +163,9 @@ def stack_obs(obs_list):
         "scores": torch.stack([torch.tensor(o["scores"], dtype=torch.float32) for o in obs_list]),
         "meta": torch.stack([torch.tensor(o["meta"], dtype=torch.float32) for o in obs_list]),
         "conflict": torch.stack([torch.tensor(o["conflict"], dtype=torch.float32) for o in obs_list]),
+        "leaders": torch.stack([torch.tensor(o["leaders"], dtype=torch.float32) for o in obs_list]),
+        "opp_scores": torch.stack([torch.tensor(o["opp_scores"], dtype=torch.float32) for o in obs_list]),
+        "opp_leaders": torch.stack([torch.tensor(o["opp_leaders"], dtype=torch.float32) for o in obs_list]),
     }
 
 # ---------------------------------------------------------------------------
@@ -219,6 +229,8 @@ def collect_rollout(env, model, rollout_steps):
         prev_scores = obs["scores"][:4]
         prev_min_score = float(np.min(prev_scores))
         prev_avg_score = float(np.mean(prev_scores))
+        prev_opp_min = float(np.min(obs["opp_scores"][:4]))
+        prev_margin = prev_min_score - prev_opp_min
 
         obs, reward, terminated, truncated, info = env.step(action.item())
         done = terminated or truncated
@@ -231,6 +243,12 @@ def collect_rollout(env, model, rollout_steps):
         avg_delta = new_avg_score - prev_avg_score
         blended_delta = (1.0 - SCORE_AVG_WEIGHT) * min_delta + SCORE_AVG_WEIGHT * avg_delta
         reward = reward + SCORE_DELTA_COEF * blended_delta
+
+        # Margin-based reward: relative score improvement vs opponent
+        new_opp_min = float(np.min(obs["opp_scores"][:4]))
+        new_margin = new_min_score - new_opp_min
+        margin_delta = new_margin - prev_margin
+        reward = reward + MARGIN_DELTA_COEF * margin_delta
 
         reward_list.append(reward)
         done_list.append(float(done))
