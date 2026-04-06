@@ -444,3 +444,9 @@ if __name__ == "__main__":
         num_steps=total_steps,
         num_params=num_params,
     )
+
+    # --- Save model ---
+    os.makedirs("models", exist_ok=True)
+    model_path = "models/policy_final.pt"
+    torch.save(model.state_dict(), model_path)
+    print(f"\nModel saved to {model_path}")

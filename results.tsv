@@ -1,0 +1,18 @@
+commit	win_rate	avg_min_score	status	description
+8062181	0.000000	0.0	crash	timeout/crash: baseline PPO
+f3d3d8d	0.000000	0.1	discard	baseline PPO
+8f4afc5	0.000000	0.0	crash	timeout/crash: baseline PPO
+542bf82	0.000000	0.5	discard	baseline PPO
+ace5961	0.000000	0.0	discard	+ROLLOUT_STEPS = 512       # steps per rollout before update +# Reward shaping +
+3454747	0.000000	0.5	discard	+ENTROPY_COEF = 0.05       # entropy bonus coefficient — higher for exploration 
+1bfc613	0.000000	0.0	discard	+ROLLOUT_STEPS = 512       # steps per rollout before update +# Reward shaping +
+6d44e6b	0.000000	1.1	discard	baseline PPO
+32df53a	0.120000	2.1	keep	+ROLLOUT_STEPS = 1024      # steps per rollout before update — larger for sparse
+6003109	0.100000	2.2	discard	+ROLLOUT_STEPS = 2048      # steps per rollout before update — larger captures m
+094672d	0.020000	0.5	discard	+LR_MIN = 3e-5               # minimum LR for cosine annealing schedule +    # C
+87dd3ba	0.220000	20.0	keep	+SCORE_DELTA_COEF = 0.5    # weight on per-step score delta — boosted to dominat
+3397827	0.020000	1.1	discard	+SCORE_AVG_WEIGHT = 0.0    # blend: 0=min-score only, 1=avg-score only — pure mi
+f163745	0.280000	3.7	keep	+SCORE_DELTA_COEF = 1.5    # weight on per-step score delta — further boosted to
+72b8631	0.140000	1.7	discard	+WIN_BONUS = 10.0          # extra reward added on terminal win — amplifies spar
+9e0594f	0.240000	3.8	discard	+BOARD_CONV_CHANNELS = 64  # channels in board CNN — doubled for richer spatial 
+a865d6a	0.080000	2.8	discard	+GAMMA = 0.999             # discount factor — increased for long-horizon game (
