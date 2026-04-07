@@ -173,6 +173,10 @@ for ((run=1; run<=MAX_RUNS; run++)); do
         echo ">>> IMPROVED! Keeping. (${best_win_rate} -> ${wr})"
         best_win_rate="$wr"
         log_result "$commit" "$wr" "$ms" "keep" "$desc"
+        if [[ -f "models/policy_final.pt" ]]; then
+          cp "models/policy_final.pt" "models/policy_best.pt"
+          echo ">>> Saved best model to models/policy_best.pt (win_rate=${wr})"
+        fi
       else
         echo ">>> No improvement (${wr} <= ${best_win_rate}). Discarding."
         log_result "$commit" "$wr" "$ms" "discard" "$desc"
