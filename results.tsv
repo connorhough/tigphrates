@@ -24,25 +24,28 @@ a865d6a	0.080000	2.8	discard	+GAMMA = 0.999             # discount factor — in
 53c9183	0.140000	3.7	keep	+MINIBATCH_SIZE = 256      # minibatch size for PPO updates — larger batches sta
 a6b15f1	0.020000	1.1	discard	+MINIBATCH_SIZE = 64       # minibatch size for PPO updates — restored to 64; 25
 925a5e3	0.040000	2.6	discard	+ENTROPY_COEF = 0.03       # entropy bonus coefficient — increased to boost expl
-fe40fb8	0.200000	7.2	keep	+PPO_EPOCHS = 4            # optimization epochs per rollout — halved to reduce 
+fe40fb8	0.200000	7.2	keep	+PPO_EPOCHS = 4            # optimization epochs per rollout — halved to reduce
 02a2c88	0.180000	4.6	discard	+LEARNING_RATE = 1e-4       # learning rate — reduced for more stable updates gi
 9c0b66d	0.260000	6.2	keep	+HIDDEN_DIM = 256          # MLP hidden dimension — doubled to increase policy c
 15879d6	0.160000	10.0	discard	+NUM_HIDDEN_LAYERS = 3     # number of hidden layers in MLP head — deeper policy
-ea7034a	0.000000	2.2	discard	+VALUE_CLIP = True         # clip value function updates like policy — prevents 
+ea7034a	0.000000	2.2	discard	+VALUE_CLIP = True         # clip value function updates like policy — prevents
 19fc248	0.160000	3.6	discard	+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_
-fa0fff5	0.120000	6.5	discard	+            layers.append(nn.LayerNorm(HIDDEN_DIM))  # normalize activations — 
+fa0fff5	0.120000	6.5	discard	+            layers.append(nn.LayerNorm(HIDDEN_DIM))  # normalize activations —
 7c9e94a	0.080000	5.1	discard	+CLIP_EPS = 0.3            # PPO clipping epsilon — loosened to allow larger pol
 46de2b0	0.120000	3.2	discard	+            # Value loss — Huber is more robust to large reward-shaped return o
 ea94326	0.100000	4.4	discard	+        self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size=3, paddi
 3e689e5	0.140000	6.5	discard	+WARMUP_ROLLOUTS = 10      # linear LR warmup over first N rollouts — stabilizes
 8d78327	0.060000	4.5	discard	+    # Per-minibatch advantage normalization — normalize within each minibatch f
 25e6046	0.120000	3.7	discard	+            layers.append(nn.GELU())  # GELU activation — smoother gradients th
-7cf9595	0.240000	6.9	discard	+VALUE_LR_MULTIPLIER = 3.0  # separate LR multiplier for critic — critic learns 
+7cf9595	0.240000	6.9	discard	+VALUE_LR_MULTIPLIER = 3.0  # separate LR multiplier for critic — critic learns
 3243a7e	0.200000	3.9	discard	+TARGET_KL = 0.01          # early stop PPO epochs when approx KL exceeds this —
-d407997	0.100000	3.8	discard	+BOARD_CONV_CHANNELS = 64  # channels in board CNN — doubled; previous test was 
+d407997	0.100000	3.8	discard	+BOARD_CONV_CHANNELS = 64  # channels in board CNN — doubled; previous test was
 bf20a8e	0.100000	3.5	discard	+NUM_HIDDEN_LAYERS = 2     # number of residual hidden layers in MLP head — each
 853eaf8	0.240000	8.1	discard	+LR_FINAL = 1e-5           # final LR at end of training — linear decay from LEA
-3e0badd	0.120000	3.8	discard	+SCORE_DELTA_COEF = 2.0    # weight on per-step score delta — tuned between 1.5 
+3e0badd	0.120000	3.8	discard	+SCORE_DELTA_COEF = 2.0    # weight on per-step score delta — tuned between 1.5
 776959a	0.060000	3.6	discard	+REWARD_CLIP = 2.0         # clip shaped reward to [-REWARD_CLIP, REWARD_CLIP] —
 c9e00ea	0.020000	0.8	discard	+NUM_ENVS = 4              # parallel environments — increases data diversity pe
 96d5908	0.140000	3.5	discard	+ROLLOUT_STEPS = 2048      # steps per rollout before update — retrying with bet
+2398d68	0.020000	1.4	keep	baseline PPO
+067e840	0.020000	1.6	discard	+ +class RunningMeanStd: +    """Online running mean/variance for reward normali
+5db241e	0.020000	1.0	discard	+PPO_EPOCHS = 8            # optimization epochs per rollout — doubled for more

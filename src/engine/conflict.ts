@@ -193,14 +193,28 @@ export function resolveWar(state: GameState): GameState {
     winner.position,
   )
 
+  // Red War Special Rule: red temples with treasures and red temples
+  // adjacent to another leader cannot be removed as casualties.
+  const removableTiles = warColor === 'red'
+    ? loserSideTiles.filter(pos => {
+        const cell = state.board[pos.row][pos.col]
+        if (cell.hasTreasure) return false
+        // Check if adjacent to any leader still on the board
+        for (const nb of getNeighbors(pos)) {
+          if (state.board[nb.row][nb.col].leader !== null) return false
+        }
+        return true
+      })
+    : loserSideTiles
+
   // Remove those tiles from the board
-  for (const pos of loserSideTiles) {
+  for (const pos of removableTiles) {
     state.board[pos.row][pos.col].tile = null
     state.board[pos.row][pos.col].hasTreasure = false
   }
 
   // Winner scores: removed tiles + 1 (for the leader)
-  state.players[winner.playerIndex].score[warColor] += loserSideTiles.length + 1
+  state.players[winner.playerIndex].score[warColor] += removableTiles.length + 1
 
   // Remove committed tiles from both players' hands
   removeCommittedTiles(state, attacker.playerIndex, attackerCommitted ?? [])

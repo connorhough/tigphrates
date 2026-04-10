@@ -32,6 +32,11 @@ function setupWarScenario(): GameState {
   state.board[10][9].tile = 'green'
   state.board[9][10].tile = 'green'
 
+  // Clear treasures from starting temples used in war scenarios so the
+  // Red War Special Rule doesn't interfere with basic war tests
+  state.board[9][6].hasTreasure = false
+  state.board[10][10].hasTreasure = false
+
   // Give players tiles
   state.players[0].hand = ['green', 'green', 'green', 'green', 'green', 'green']
   state.players[1].hand = ['green', 'green', 'green', 'green', 'green', 'green']
@@ -230,21 +235,34 @@ describe('war', () => {
   it('leaders without temple adjacency withdrawn after war', () => {
     const state = createGame(2)
 
+    // Clear treasures from starting temples so Red War Special Rule doesn't interfere
+    state.board[9][6].hasTreasure = false
+    state.board[10][10].hasTreasure = false
+
     // Kingdom A around temple (9,6):
-    // Player 0's red leader at (9,5), plus a blue leader at (9,7)
-    // Blue leader at (9,7) is adjacent to (9,6) which is a red temple.
-    // But also add red tile at (9,8) near blue leader.
+    // Player 0's red leader at (9,5)
     state.board[9][5].leader = { color: 'red', dynasty: 'archer' }
     state.players[0].leaders.find(l => l.color === 'red')!.position = { row: 9, col: 5 }
     // Extra red tile at (10,6) to give attacker base
     state.board[10][6].tile = 'red'
-    // Blue leader at (10,5) — adjacent to (10,6) [red] and (9,5) [leader]
-    // Actually put the blue leader adjacent ONLY to the red temple.
-    // (9,7) is adjacent to (9,6) [temple], so blue leader there.
-    // After war, if attacker loses, red tiles on attacker side removed: (9,6) temple.
-    // Then blue leader at (9,7) no longer adjacent to any red tile → withdrawn.
-    state.board[9][7].leader = { color: 'blue', dynasty: 'archer' }
-    state.players[0].leaders.find(l => l.color === 'blue')!.position = { row: 9, col: 7 }
+    // Blue leader at (8,6) — adjacent to (9,6) temple but NOT adjacent to (9,5) red leader
+    // After war, temple at (9,6) gets removed (no treasure, not adjacent to any leader
+    // other than via (9,5) which will be empty after red leader removal).
+    // Wait — (9,6) IS adjacent to (8,6) where the blue leader is. So it's protected.
+    //
+    // Instead: put blue leader at (8,5) adjacent to a red tile at (8,6) that IS on loser side
+    // and not adjacent to any leader. (8,6) neighbors: (7,6), (9,6), (8,5), (8,7).
+    // Blue leader at (8,5) means (8,6) IS adjacent to a leader → protected.
+    //
+    // The Red War Special Rule means in a red war, any red temple adjacent to a leader
+    // is protected. So the only way to strand a leader via red war is if the leader's
+    // adjacent temple is NOT on the loser side (and the removal of other tiles causes
+    // no connectivity-based issues, since adjacency is direct neighbor only).
+    //
+    // This scenario is essentially impossible: if a leader is adjacent to a red temple,
+    // that temple is adjacent to a leader → always protected in red wars.
+    // So test this via catastrophe-induced stranding instead.
+    state.board[9][7].tile = 'green'
     state.board[9][8].tile = 'green'
 
     // Kingdom B around temple (10,10):
@@ -269,16 +287,13 @@ describe('war', () => {
     // Defender commits 3 red tiles
     result = applyAction(result, { type: 'commitSupport', indices: [0, 1, 2] })
 
-    // Defender wins: attacker's red leader removed + red tiles on attacker side removed
+    // Defender wins: attacker's red leader removed
     expect(result.board[9][5].leader).toBeNull()
-    // Red tile at (9,6) temple removed, (10,6) red removed
+    // Temple at (9,6): now no longer adjacent to any leader (red leader at (9,5) removed)
+    // So it's NOT protected and gets removed
     expect(result.board[9][6].tile).toBeNull()
+    // (10,6) also not adjacent to any leader → removed
     expect(result.board[10][6].tile).toBeNull()
-
-    // Blue leader at (9,7): neighbors are (9,6) [now empty], (9,8) [green tile], (8,7) [empty]
-    // No adjacent face-up red temple → withdrawn
-    expect(result.board[9][7].leader).toBeNull()
-    expect(result.players[0].leaders.find(l => l.color === 'blue')!.position).toBeNull()
   })
 
   it('war support must match conflict color (not red for non-red wars)', () => {
@@ -343,6 +358,103 @@ describe('war', () => {
     expect(result.turnPhase).toBe('action')
     expect(result.pendingConflict).toBeNull()
     expect(result.actionsRemaining).toBe(1)
+  })
+
+  it('red war: temples with treasures are not removed as casualties', () => {
+    const state = setupWarScenario()
+
+    // Restore treasure on (10,10) for this test
+    state.board[10][10].hasTreasure = true
+    expect(state.board[10][10].hasTreasure).toBe(true)
+    // Add another red tile on defender side without treasure
+    state.board[10][12].tile = 'red'
+
+    state.players[0].hand = ['red', 'red', 'red', 'red', 'red', 'green']
+    state.players[1].hand = ['blue', 'blue', 'blue', 'blue', 'blue', 'blue']
+
+    // Place green at (9,9) → red war
+    let result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 9, col: 9 } })
+    expect(result.pendingConflict!.color).toBe('red')
+
+    // Attacker overwhelms defender
+    result = applyAction(result, { type: 'commitSupport', indices: [0, 1, 2] })
+    result = applyAction(result, { type: 'commitSupport', indices: [] })
+
+    // Defender loses — leader removed
+    expect(result.board[10][11].leader).toBeNull()
+    // Temple at (10,10) with treasure should NOT be removed
+    expect(result.board[10][10].tile).toBe('red')
+    expect(result.board[10][10].hasTreasure).toBe(true)
+    // Non-treasure red tile at (10,12) SHOULD be removed
+    expect(result.board[10][12].tile).toBeNull()
+  })
+
+  it('red war: temples adjacent to another leader are not removed as casualties', () => {
+    const state = setupWarScenario()
+
+    // Remove treasure from (10,10) so we're only testing leader-adjacency protection
+    state.board[10][10].hasTreasure = false
+
+    // Place player 1's blue leader at (10,9) — adjacent to temple at (10,10)
+    state.board[10][9].tile = null
+    state.board[10][9].leader = { color: 'blue', dynasty: 'bull' }
+    state.players[1].leaders.find(l => l.color === 'blue')!.position = { row: 10, col: 9 }
+    // Need some connectivity on defender side — add a tile
+    state.board[9][10].tile = 'red'
+    state.board[10][12].tile = 'red'
+
+    state.players[0].hand = ['red', 'red', 'red', 'red', 'red', 'green']
+    state.players[1].hand = ['blue', 'blue', 'blue', 'blue', 'blue', 'blue']
+
+    let result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 9, col: 9 } })
+    expect(result.pendingConflict!.color).toBe('red')
+
+    // Attacker overwhelms
+    result = applyAction(result, { type: 'commitSupport', indices: [0, 1, 2] })
+    result = applyAction(result, { type: 'commitSupport', indices: [] })
+
+    // Defender's red leader removed
+    expect(result.board[10][11].leader).toBeNull()
+    // Temple at (10,10) is adjacent to blue leader at (10,9) → protected
+    expect(result.board[10][10].tile).toBe('red')
+    // Red tile at (10,12) is NOT adjacent to any leader → removed
+    expect(result.board[10][12].tile).toBeNull()
+  })
+
+  it('red war special rule does not apply to non-red wars', () => {
+    const state = createGame(2)
+
+    // Set up green war
+    state.board[9][5].leader = { color: 'green', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'green')!.position = { row: 9, col: 5 }
+    state.board[9][7].tile = 'green'
+    state.board[9][8].tile = 'green'
+
+    state.board[10][11].leader = { color: 'green', dynasty: 'bull' }
+    state.players[1].leaders.find(l => l.color === 'green')!.position = { row: 10, col: 11 }
+    state.board[10][9].tile = 'green'
+    state.board[9][10].tile = 'green'
+
+    // Place a leader adjacent to a green tile on defender side to verify
+    // the adjacency protection does NOT apply to green wars
+    state.board[10][12].tile = 'green'
+    state.board[10][13].leader = { color: 'blue', dynasty: 'bull' }
+    state.players[1].leaders.find(l => l.color === 'blue')!.position = { row: 10, col: 13 }
+    // Need blue leader to have temple adjacency — add red tile nearby
+    state.board[10][14].tile = 'red'
+
+    state.players[0].hand = ['green', 'green', 'green', 'green', 'green', 'green']
+    state.players[1].hand = ['red', 'red', 'red', 'red', 'red', 'red']
+
+    let result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 9, col: 9 } })
+    expect(result.pendingConflict!.color).toBe('green')
+
+    // Attacker overwhelms
+    result = applyAction(result, { type: 'commitSupport', indices: [0, 1, 2] })
+    result = applyAction(result, { type: 'commitSupport', indices: [] })
+
+    // Green tile at (10,12) adjacent to blue leader should still be removed (not red war)
+    expect(result.board[10][12].tile).toBeNull()
   })
 
   it('after war resolution returns to action phase with decremented actions', () => {

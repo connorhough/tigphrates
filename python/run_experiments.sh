@@ -29,6 +29,7 @@ MAX_RUNS="${POSITIONAL[1]:-999}"
 BRANCH="autoresearch/${TAG}"
 TSV="results.tsv"
 LOG="run.log"
+TOKENS_JSON="tokens.json"
 TIMEOUT=720  # 12 min kill timeout
 
 if $DRY_RUN; then
@@ -61,6 +62,10 @@ fi
 
 if [[ ! -f "$TSV" ]]; then
   printf 'commit\twin_rate\tavg_min_score\tstatus\tdescription\n' > "$TSV"
+fi
+
+if [[ ! -f "$TOKENS_JSON" ]]; then
+  echo '{"runs":[]}' > "$TOKENS_JSON"
 fi
 
 best_win_rate="0.000000"
@@ -117,7 +122,43 @@ Best win_rate: ${best_wr}
 
 Current train.py is at python/train.py — read it, then edit with your idea."
 
-  claude --print --model claude-sonnet-4-6 --allowedTools Edit,Read,Bash,Grep,Glob -p "$prompt"
+  local claude_json
+  claude_json=$(claude --print --output-format json --model claude-sonnet-4-6 --allowedTools Edit,Read,Bash,Grep,Glob -p "$prompt")
+
+  # Log token usage to JSON
+  local ts input_tokens output_tokens cache_read cache_creation cost_usd
+  ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  input_tokens=$(echo "$claude_json" | python3 -c "import sys,json; u=json.load(sys.stdin)['usage']; print(u.get('input_tokens',0))")
+  output_tokens=$(echo "$claude_json" | python3 -c "import sys,json; u=json.load(sys.stdin)['usage']; print(u.get('output_tokens',0))")
+  cache_read=$(echo "$claude_json" | python3 -c "import sys,json; u=json.load(sys.stdin)['usage']; print(u.get('cache_read_input_tokens',0))")
+  cache_creation=$(echo "$claude_json" | python3 -c "import sys,json; u=json.load(sys.stdin)['usage']; print(u.get('cache_creation_input_tokens',0))")
+  cost_usd=$(echo "$claude_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('total_cost_usd',0))")
+
+  python3 - <<PYEOF
+import json, sys
+with open("$TOKENS_JSON") as f:
+    data = json.load(f)
+data["runs"].append({
+    "ts": "$ts",
+    "run": $run,
+    "branch": "$BRANCH",
+    "input_tokens": $input_tokens,
+    "output_tokens": $output_tokens,
+    "cache_read_input_tokens": $cache_read,
+    "cache_creation_input_tokens": $cache_creation,
+    "cost_usd": $cost_usd,
+})
+# running totals
+totals = {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "cost_usd": 0.0}
+for r in data["runs"]:
+    for k in totals:
+        totals[k] += r.get(k, 0)
+data["totals"] = totals
+with open("$TOKENS_JSON", "w") as f:
+    json.dump(data, f, indent=2)
+PYEOF
+
+  echo ">>> Tokens: input=${input_tokens} output=${output_tokens} cache_read=${cache_read} cost=\$${cost_usd}"
 }
 
 # --- Main loop ---
