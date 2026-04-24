@@ -4,134 +4,150 @@ interface PlayerPanelProps {
   state: GameState
 }
 
-const DYNASTY_COLORS: Record<Dynasty, string> = {
-  archer: '#e74c3c',
-  bull: '#3498db',
-  pot: '#2ecc71',
-  lion: '#f39c12',
+const DYNASTY_VAR: Record<Dynasty, string> = {
+  archer: 'var(--dynasty-archer)',
+  bull: 'var(--dynasty-bull)',
+  pot: 'var(--dynasty-pot)',
+  lion: 'var(--dynasty-lion)',
 }
 
-const TILE_DISPLAY: Record<TileColor, { label: string; color: string }> = {
-  red: { label: 'Temple', color: '#e74c3c' },
-  blue: { label: 'Farm', color: '#3498db' },
-  green: { label: 'Market', color: '#2ecc71' },
-  black: { label: 'Settlement', color: '#333' },
+const TILE_VAR: Record<TileColor, string> = {
+  red: 'var(--tile-red)',
+  blue: 'var(--tile-blue)',
+  green: 'var(--tile-green)',
+  black: 'var(--tile-black)',
 }
 
-const LEADER_DISPLAY: Record<LeaderColor, { label: string; color: string }> = {
-  red: { label: 'Priest', color: '#e74c3c' },
-  blue: { label: 'Farmer', color: '#3498db' },
-  green: { label: 'Trader', color: '#2ecc71' },
-  black: { label: 'King', color: '#555' },
-}
+const LEADER_VAR: Record<LeaderColor, string> = TILE_VAR
 
 export function PlayerPanel({ state }: PlayerPanelProps) {
   return (
-    <div style={{
-      width: '220px',
-      background: '#16213e',
-      borderLeft: '2px solid #0f3460',
-      padding: '12px',
-      overflowY: 'auto',
-      fontFamily: 'sans-serif',
-      fontSize: '13px',
-      color: '#e0e0e0',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '12px',
-    }}>
+    <div
+      style={{
+        width: 180,
+        flexShrink: 0,
+        background: 'var(--paper-dark)',
+        borderLeft: '1px solid var(--rule)',
+        padding: 8,
+        paddingRight: 'calc(8px + var(--sar))',
+        overflowY: 'auto',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 11,
+        color: 'var(--ink-light)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+      }}
+    >
       {state.players.map((player, idx) => {
         const isCurrent = idx === state.currentPlayer
-        const dynastyColor = DYNASTY_COLORS[player.dynasty]
+        const dynastyColor = DYNASTY_VAR[player.dynasty]
 
         return (
-          <div key={idx} style={{
-            padding: '10px',
-            borderRadius: '6px',
-            background: isCurrent ? '#1a2a5e' : '#0f1b3e',
-            border: isCurrent ? `2px solid ${dynastyColor}` : '2px solid transparent',
-          }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              marginBottom: '8px',
-            }}>
-              <div style={{
-                width: '10px',
-                height: '10px',
-                borderRadius: '50%',
-                background: dynastyColor,
-              }} />
-              <span style={{
-                fontWeight: 'bold',
-                textTransform: 'capitalize',
-                color: dynastyColor,
-              }}>
+          <div
+            key={idx}
+            style={{
+              padding: 8,
+              background: isCurrent ? 'var(--paper-light)' : 'var(--paper)',
+              borderLeft: `2px solid ${isCurrent ? dynastyColor : 'transparent'}`,
+              border: '1px solid var(--rule-light)',
+              borderLeftWidth: 2,
+              borderLeftColor: isCurrent ? dynastyColor : 'var(--rule-light)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                marginBottom: 6,
+              }}
+            >
+              <div
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: dynastyColor,
+                }}
+              />
+              <span
+                style={{
+                  fontWeight: 700,
+                  textTransform: 'uppercase',
+                  letterSpacing: 1,
+                  color: dynastyColor,
+                  fontSize: 10,
+                }}
+              >
                 {player.dynasty}
               </span>
               {player.isAI && (
-                <span style={{ color: '#666', fontSize: '11px' }}>(AI)</span>
+                <span style={{ color: 'var(--ink-faint)', fontSize: 9 }}>AI</span>
               )}
             </div>
 
-            {/* Scores */}
-            <div style={{ marginBottom: '6px' }}>
-              <div style={{ color: '#888', fontSize: '11px', marginBottom: '3px' }}>Score</div>
-              <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                {(Object.keys(player.score) as TileColor[]).map(color => (
-                  <div key={color} style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '3px',
-                  }}>
-                    <div style={{
-                      width: '8px',
-                      height: '8px',
-                      borderRadius: '2px',
-                      background: TILE_DISPLAY[color].color,
-                    }} />
-                    <span style={{ fontSize: '12px' }}>{player.score[color]}</span>
-                  </div>
-                ))}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
-                  <span style={{ fontSize: '10px', color: '#f1c40f' }}>T</span>
-                  <span style={{ fontSize: '12px' }}>{player.treasures}</span>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
+              {(Object.keys(player.score) as TileColor[]).map((color) => (
+                <div
+                  key={color}
+                  style={{ display: 'flex', alignItems: 'center', gap: 3 }}
+                >
+                  <div
+                    style={{
+                      width: 6,
+                      height: 6,
+                      background: TILE_VAR[color],
+                    }}
+                  />
+                  <span style={{ color: 'var(--ink)', fontSize: 11 }}>
+                    {player.score[color]}
+                  </span>
                 </div>
+              ))}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                <span style={{ fontSize: 9, color: 'var(--treasure)' }}>T</span>
+                <span style={{ color: 'var(--ink)', fontSize: 11 }}>
+                  {player.treasures}
+                </span>
               </div>
             </div>
 
-            {/* Leaders */}
-            <div style={{ marginBottom: '6px' }}>
-              <div style={{ color: '#888', fontSize: '11px', marginBottom: '3px' }}>Leaders</div>
-              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                {player.leaders.map(leader => {
-                  const display = LEADER_DISPLAY[leader.color]
-                  const onBoard = leader.position !== null
-                  return (
-                    <div key={leader.color} style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '2px',
-                      opacity: onBoard ? 1 : 0.4,
-                    }} title={`${display.label}: ${onBoard ? 'on board' : 'in hand'}`}>
-                      <div style={{
-                        width: '8px',
-                        height: '8px',
-                        borderRadius: '50%',
-                        background: display.color,
-                        border: onBoard ? '1px solid #fff' : '1px solid #555',
-                      }} />
-                    </div>
-                  )
-                })}
-              </div>
+            <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+              {player.leaders.map((leader) => {
+                const onBoard = leader.position !== null
+                return (
+                  <div
+                    key={leader.color}
+                    title={`${leader.color}: ${onBoard ? 'on board' : 'in hand'}`}
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: LEADER_VAR[leader.color],
+                      opacity: onBoard ? 1 : 0.3,
+                      border: onBoard
+                        ? '1px solid var(--ink)'
+                        : '1px solid var(--rule)',
+                    }}
+                  />
+                )
+              })}
             </div>
 
-            {/* Catastrophes */}
-            <div style={{ color: '#888', fontSize: '11px' }}>
-              Catastrophes: {player.catastrophesRemaining}
-            </div>
+            {player.catastrophesRemaining > 0 && (
+              <div
+                style={{
+                  marginTop: 4,
+                  color: 'var(--ink-faint)',
+                  fontSize: 9,
+                  letterSpacing: 0.5,
+                  textTransform: 'uppercase',
+                }}
+              >
+                Cat ×{player.catastrophesRemaining}
+              </div>
+            )}
           </div>
         )
       })}

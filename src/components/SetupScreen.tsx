@@ -5,10 +5,10 @@ interface SetupScreenProps {
 }
 
 const DYNASTIES = [
-  { name: 'Archer', color: '#e74c3c', symbol: '🏹' },
-  { name: 'Bull', color: '#3498db', symbol: '🐂' },
-  { name: 'Pot', color: '#2ecc71', symbol: '🏺' },
-  { name: 'Lion', color: '#f39c12', symbol: '🦁' },
+  { name: 'Archer', color: 'var(--dynasty-archer)', symbol: '🏹' },
+  { name: 'Bull', color: 'var(--dynasty-bull)', symbol: '🐂' },
+  { name: 'Pot', color: 'var(--dynasty-pot)', symbol: '🏺' },
+  { name: 'Lion', color: 'var(--dynasty-lion)', symbol: '🦁' },
 ]
 
 export function SetupScreen({ onStartGame }: SetupScreenProps) {
@@ -16,7 +16,7 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
   const [aiFlags, setAiFlags] = useState([false, true, true, true])
 
   const toggleAI = (index: number) => {
-    setAiFlags(prev => {
+    setAiFlags((prev) => {
       const next = [...prev]
       next[index] = !next[index]
       return next
@@ -28,73 +28,87 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      background: '#1a1a2e',
-      fontFamily: 'system-ui, sans-serif',
-    }}>
-      <div style={{
-        background: '#16213e',
-        borderRadius: '16px',
-        padding: '40px 48px',
-        minWidth: '400px',
-        maxWidth: '480px',
-        boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-        border: '1px solid #0f3460',
-      }}>
-        <h1 style={{
-          margin: '0 0 8px',
-          fontSize: '32px',
-          fontWeight: 600,
-          color: '#e0e0e0',
-          textAlign: 'center',
-          letterSpacing: '-0.5px',
-        }}>
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100%',
+        padding: 'calc(20px + var(--sat)) calc(20px + var(--sal)) calc(20px + var(--sab)) calc(20px + var(--sar))',
+        background: 'var(--paper)',
+      }}
+    >
+      <div
+        style={{
+          background: 'var(--paper-dark)',
+          padding: '28px 24px',
+          width: '100%',
+          maxWidth: 420,
+          border: '1px solid var(--rule)',
+        }}
+      >
+        <h1
+          style={{
+            margin: '0 0 4px',
+            fontFamily: 'var(--font-display)',
+            fontSize: 26,
+            fontWeight: 700,
+            color: 'var(--ink)',
+            textAlign: 'center',
+            letterSpacing: 0.5,
+          }}
+        >
           Tigris &amp; Euphrates
         </h1>
-        <p style={{
-          margin: '0 0 32px',
-          fontSize: '13px',
-          color: '#556',
-          textAlign: 'center',
-        }}>
-          Civilization building in ancient Mesopotamia
+        <p
+          style={{
+            margin: '0 0 24px',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--ink-faint)',
+            textAlign: 'center',
+            textTransform: 'uppercase',
+            letterSpacing: 2,
+          }}
+        >
+          Mesopotamia · 3500 BC
         </p>
 
-        {/* Player count */}
-        <div style={{ marginBottom: '28px' }}>
-          <label style={{
-            display: 'block',
-            fontSize: '12px',
-            fontWeight: 600,
-            color: '#8890a4',
-            textTransform: 'uppercase',
-            letterSpacing: '1px',
-            marginBottom: '10px',
-          }}>
+        <div style={{ marginBottom: 20 }}>
+          <label
+            style={{
+              display: 'block',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              color: 'var(--ink-faint)',
+              textTransform: 'uppercase',
+              letterSpacing: 1.5,
+              marginBottom: 8,
+            }}
+          >
             Players
           </label>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            {[2, 3, 4].map(n => (
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[2, 3, 4].map((n) => (
               <button
                 key={n}
                 onClick={() => setPlayerCount(n)}
                 style={{
                   flex: 1,
-                  padding: '10px',
-                  borderRadius: '8px',
-                  border: playerCount === n
-                    ? '2px solid #5a7ec7'
-                    : '2px solid #2a2a4a',
-                  background: playerCount === n ? '#1e3a6e' : '#12132a',
-                  color: playerCount === n ? '#c0d0f0' : '#556',
-                  fontSize: '16px',
-                  fontWeight: 600,
+                  padding: '12px',
+                  minHeight: 48,
+                  border:
+                    playerCount === n
+                      ? '1px solid var(--accent)'
+                      : '1px solid var(--rule)',
+                  background:
+                    playerCount === n ? 'var(--paper-light)' : 'var(--paper)',
+                  color:
+                    playerCount === n ? 'var(--accent)' : 'var(--ink-light)',
+                  fontFamily: 'var(--font-display)',
+                  fontSize: 18,
+                  fontWeight: 700,
                   cursor: 'pointer',
-                  transition: 'all 0.15s',
                 }}
               >
                 {n}
@@ -103,8 +117,14 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
           </div>
         </div>
 
-        {/* Player slots */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '32px' }}>
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            marginBottom: 24,
+          }}
+        >
           {Array.from({ length: playerCount }, (_, i) => {
             const dynasty = DYNASTIES[i]
             return (
@@ -113,35 +133,43 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '12px',
+                  gap: 12,
                   padding: '10px 14px',
-                  borderRadius: '8px',
-                  background: '#12132a',
-                  border: `1px solid ${dynasty.color}33`,
+                  minHeight: 48,
+                  background: 'var(--paper)',
+                  border: '1px solid var(--rule)',
+                  borderLeft: `3px solid ${dynasty.color}`,
                 }}
               >
-                <span style={{ fontSize: '20px' }}>{dynasty.symbol}</span>
-                <span style={{
-                  flex: 1,
-                  fontSize: '14px',
-                  fontWeight: 600,
-                  color: dynasty.color,
-                }}>
+                <span style={{ fontSize: 22 }}>{dynasty.symbol}</span>
+                <span
+                  style={{
+                    flex: 1,
+                    fontFamily: 'var(--font-display)',
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: dynasty.color,
+                  }}
+                >
                   {dynasty.name}
                 </span>
                 <button
                   onClick={() => toggleAI(i)}
                   style={{
-                    padding: '4px 14px',
-                    borderRadius: '6px',
-                    border: 'none',
-                    background: aiFlags[i] ? '#2a2a4a' : dynasty.color + '30',
-                    color: aiFlags[i] ? '#889' : dynasty.color,
-                    fontSize: '12px',
-                    fontWeight: 600,
+                    padding: '8px 14px',
+                    minHeight: 36,
+                    minWidth: 72,
+                    border: '1px solid var(--rule)',
+                    background: aiFlags[i]
+                      ? 'var(--paper-dark)'
+                      : 'var(--paper-light)',
+                    color: aiFlags[i] ? 'var(--ink-faint)' : dynasty.color,
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    fontWeight: 500,
+                    textTransform: 'uppercase',
+                    letterSpacing: 1,
                     cursor: 'pointer',
-                    minWidth: '64px',
-                    transition: 'all 0.15s',
                   }}
                 >
                   {aiFlags[i] ? 'AI' : 'Human'}
@@ -151,27 +179,21 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
           })}
         </div>
 
-        {/* Start button */}
         <button
           onClick={handleStart}
           style={{
             width: '100%',
-            padding: '14px',
-            borderRadius: '10px',
-            border: 'none',
-            background: 'linear-gradient(135deg, #1e3a6e, #0f3460)',
-            color: '#c0d0f0',
-            fontSize: '16px',
-            fontWeight: 600,
+            padding: 14,
+            minHeight: 52,
+            border: '1px solid var(--accent)',
+            background: 'var(--paper-light)',
+            color: 'var(--accent)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 13,
+            fontWeight: 500,
             cursor: 'pointer',
-            letterSpacing: '0.5px',
-            transition: 'all 0.15s',
-          }}
-          onMouseEnter={e => {
-            e.currentTarget.style.background = 'linear-gradient(135deg, #2a4e8e, #1a4a7a)'
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.background = 'linear-gradient(135deg, #1e3a6e, #0f3460)'
+            textTransform: 'uppercase',
+            letterSpacing: 2,
           }}
         >
           Start Game

@@ -164,27 +164,18 @@ function App() {
     <div style={{
       display: 'flex',
       flexDirection: 'column',
-      height: '100vh',
-      background: '#1a1a2e',
+      height: '100%',
+      background: 'var(--paper)',
       overflow: 'hidden',
     }}>
       <TopBar state={state} />
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <div style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          overflow: 'auto',
-          padding: '16px',
-        }}>
-          <GameBoard
-            state={state}
-            highlights={highlights}
-            onCellClick={handleCellClick}
-          />
-        </div>
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        <GameBoard
+          state={state}
+          highlights={highlights}
+          onCellClick={handleCellClick}
+        />
         <PlayerPanel state={state} />
       </div>
 

@@ -1,19 +1,170 @@
+:root {
+  /* Dracula palette (matches nanoclaw dashboard) */
+  --paper: #282a36;
+  --paper-dark: #21222c;
+  --paper-light: #2d2f3d;
+  --ink: #f8f8f2;
+  --ink-light: #bfbfb6;
+  --ink-faint: #6272a4;
+  --ink-ghost: #44475a;
+  --rule: #44475a;
+  --rule-light: #383a4a;
+  --accent: #ff79c6;
+  --accent-light: #ff92d0;
+
+  /* Tile / dynasty colors (Dracula-adjacent, brighter than original) */
+  --tile-red: #ff5555;
+  --tile-blue: #8be9fd;
+  --tile-green: #50fa7b;
+  --tile-black: #bd93f9;
+  --dynasty-archer: #ff5555;
+  --dynasty-bull: #8be9fd;
+  --dynasty-pot: #50fa7b;
+  --dynasty-lion: #ffb86c;
+  --treasure: #f1fa8c;
+
+  /* Fonts */
+  --font-body: 'Crimson Pro', Georgia, serif;
+  --font-display: 'Libre Baskerville', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Safe-area helpers */
+  --sab: env(safe-area-inset-bottom, 0px);
+  --sat: env(safe-area-inset-top, 0px);
+  --sal: env(safe-area-inset-left, 0px);
+  --sar: env(safe-area-inset-right, 0px);
+}
+
 * {
   margin: 0;
   padding: 0;
   box-sizing: border-box;
 }
 
+html,
 body {
-  font-family: system-ui, 'Segoe UI', Roboto, sans-serif;
-  background: #1a1a2e;
-  color: #e0e0e0;
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.6;
+  background: var(--paper);
+  color: var(--ink);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
-#root {
+/* Subtle paper texture (matches nanoclaw) */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.015'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+#root,
+#app-root {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100vh;
+  height: 100svh;
+}
+
+button {
+  font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+canvas {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* Rotate-to-landscape overlay. Phone portrait only. */
+#rotate-overlay {
+  display: none;
+}
+
+@media (orientation: portrait) and (max-width: 900px) {
+  #rotate-overlay {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 20px;
+    padding: 32px;
+    text-align: center;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  #app-root {
+    visibility: hidden;
+  }
+}
+
+#rotate-overlay .rotate-icon {
+  width: 80px;
+  height: 80px;
+  border: 2px solid var(--rule);
+  border-radius: 12px;
+  position: relative;
+  animation: rotate-hint 2.4s ease-in-out infinite;
+}
+
+#rotate-overlay .rotate-icon::after {
+  content: '';
+  position: absolute;
+  inset: 12px;
+  border: 1px solid var(--ink-faint);
+  border-radius: 4px;
+}
+
+#rotate-overlay h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+#rotate-overlay p {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+@keyframes rotate-hint {
+  0%,
+  40% {
+    transform: rotate(0deg);
+  }
+  60%,
+  100% {
+    transform: rotate(-90deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 1;
+  }
 }

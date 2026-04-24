@@ -1,4 +1,5 @@
 import { GameState, MonumentId } from '../engine/types'
+import { Overlay, Sheet, Header } from './ConflictDialog'
 
 interface MonumentDialogProps {
   state: GameState
@@ -6,100 +7,100 @@ interface MonumentDialogProps {
   onDeclineMonument: () => void
 }
 
-const COLOR_HEX: Record<string, string> = {
-  red: '#e74c3c',
-  blue: '#3498db',
-  green: '#2ecc71',
-  black: '#888',
+const TILE_VAR: Record<string, string> = {
+  red: 'var(--tile-red)',
+  blue: 'var(--tile-blue)',
+  green: 'var(--tile-green)',
+  black: 'var(--tile-black)',
 }
 
-const COLOR_LABELS: Record<string, string> = {
+const LABELS: Record<string, string> = {
   red: 'Temple',
   blue: 'Farm',
   green: 'Market',
   black: 'Settlement',
 }
 
-export function MonumentDialog({ state, onBuildMonument, onDeclineMonument }: MonumentDialogProps) {
+export function MonumentDialog({
+  state,
+  onBuildMonument,
+  onDeclineMonument,
+}: MonumentDialogProps) {
   const pending = state.pendingMonument
   if (!pending) return null
 
-  const availableMonuments = state.monuments.filter(m =>
-    m.position === null && (m.color1 === pending.color || m.color2 === pending.color)
+  const available = state.monuments.filter(
+    (m) =>
+      m.position === null && (m.color1 === pending.color || m.color2 === pending.color),
   )
 
   return (
-    <div style={{
-      position: 'fixed',
-      inset: 0,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'rgba(0,0,0,0.7)',
-      zIndex: 1000,
-    }}>
-      <div style={{
-        background: '#1a1a2e',
-        border: '2px solid #0f3460',
-        borderRadius: '12px',
-        padding: '24px 32px',
-        minWidth: '320px',
-        maxWidth: '440px',
-        fontFamily: 'sans-serif',
-        color: '#e0e0e0',
-      }}>
-        <div style={{
-          fontSize: '18px',
-          fontWeight: 'bold',
-          marginBottom: '8px',
-        }}>
-          Build a Monument?
+    <Overlay>
+      <Sheet>
+        <Header>Build a Monument?</Header>
+        <div
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--ink-faint)',
+            textTransform: 'uppercase',
+            letterSpacing: 1,
+            marginBottom: 14,
+          }}
+        >
+          2×2 {LABELS[pending.color]} at ({pending.position.row}, {pending.position.col})
         </div>
 
-        <div style={{ fontSize: '13px', color: '#888', marginBottom: '16px' }}>
-          A 2x2 {COLOR_LABELS[pending.color]} region at ({pending.position.row}, {pending.position.col})
-        </div>
-
-        {availableMonuments.length === 0 ? (
-          <div style={{ color: '#666', fontSize: '13px', marginBottom: '12px' }}>
+        {available.length === 0 ? (
+          <div style={{ color: 'var(--ink-faint)', marginBottom: 12 }}>
             No monuments available for this color.
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
-            {availableMonuments.map(monument => (
+          <div
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8,
+              marginBottom: 14,
+            }}
+          >
+            {available.map((m) => (
               <button
-                key={monument.id}
-                onClick={() => onBuildMonument(monument.id)}
+                key={m.id}
+                onClick={() => onBuildMonument(m.id)}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '10px',
-                  padding: '12px 16px',
-                  borderRadius: '8px',
-                  border: '1px solid #0f3460',
-                  background: '#0f1b3e',
-                  color: '#e0e0e0',
+                  gap: 10,
+                  padding: 12,
+                  minHeight: 48,
+                  border: '1px solid var(--rule)',
+                  background: 'var(--paper-light)',
+                  color: 'var(--ink)',
                   cursor: 'pointer',
-                  fontSize: '14px',
-                  fontFamily: 'sans-serif',
+                  fontFamily: 'var(--font-body)',
+                  fontSize: 14,
+                  textAlign: 'left',
                 }}
               >
-                <div style={{ display: 'flex', gap: '3px' }}>
-                  <div style={{
-                    width: '20px',
-                    height: '20px',
-                    borderRadius: '3px',
-                    background: COLOR_HEX[monument.color1],
-                  }} />
-                  <div style={{
-                    width: '20px',
-                    height: '20px',
-                    borderRadius: '3px',
-                    background: COLOR_HEX[monument.color2],
-                  }} />
+                <div style={{ display: 'flex', gap: 3 }}>
+                  <div
+                    style={{
+                      width: 22,
+                      height: 22,
+                      background: TILE_VAR[m.color1],
+                    }}
+                  />
+                  <div
+                    style={{
+                      width: 22,
+                      height: 22,
+                      background: TILE_VAR[m.color2],
+                    }}
+                  />
                 </div>
                 <span>
-                  Build {COLOR_LABELS[monument.color1]}/{COLOR_LABELS[monument.color2]} Monument
+                  Build {LABELS[m.color1]}/{LABELS[m.color2]}
                 </span>
               </button>
             ))}
@@ -110,19 +111,21 @@ export function MonumentDialog({ state, onBuildMonument, onDeclineMonument }: Mo
           onClick={onDeclineMonument}
           style={{
             width: '100%',
-            padding: '10px',
-            borderRadius: '6px',
-            border: '1px solid #333',
-            background: '#1a1a2e',
-            color: '#888',
+            padding: 12,
+            minHeight: 44,
+            border: '1px solid var(--rule)',
+            background: 'transparent',
+            color: 'var(--ink-faint)',
             cursor: 'pointer',
-            fontSize: '13px',
-            fontFamily: 'sans-serif',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            textTransform: 'uppercase',
+            letterSpacing: 1,
           }}
         >
           Decline
         </button>
-      </div>
-    </div>
+      </Sheet>
+    </Overlay>
   )
 }

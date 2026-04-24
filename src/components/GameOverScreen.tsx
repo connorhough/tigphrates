@@ -1,6 +1,6 @@
 import { GameState, TileColor, Dynasty } from '../engine/types'
 import { calculateFinalScores } from '../engine/turn'
-import { COLORS, DYNASTY_COLORS } from '../rendering/colors'
+import { Overlay, Sheet } from './ConflictDialog'
 
 interface GameOverScreenProps {
   state: GameState
@@ -9,11 +9,25 @@ interface GameOverScreenProps {
 
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 
-const COLOR_LABELS: Record<TileColor, string> = {
+const TILE_VAR: Record<TileColor, string> = {
+  red: 'var(--tile-red)',
+  blue: 'var(--tile-blue)',
+  green: 'var(--tile-green)',
+  black: 'var(--tile-black)',
+}
+
+const LABELS: Record<TileColor, string> = {
   red: 'Temple',
   blue: 'Farm',
   green: 'Market',
-  black: 'Settlement',
+  black: 'Settle',
+}
+
+const DYNASTY_VAR: Record<Dynasty, string> = {
+  archer: 'var(--dynasty-archer)',
+  bull: 'var(--dynasty-bull)',
+  pot: 'var(--dynasty-pot)',
+  lion: 'var(--dynasty-lion)',
 }
 
 const DYNASTY_LABELS: Record<Dynasty, string> = {
@@ -26,158 +40,185 @@ const DYNASTY_LABELS: Record<Dynasty, string> = {
 export function GameOverScreen({ state, onPlayAgain }: GameOverScreenProps) {
   const results = calculateFinalScores(state)
   const winnerScore = results[0].finalScore
-  // Handle ties: all players matching the top score are winners
   const winnerIndices = new Set(
-    results.filter(r => r.finalScore === winnerScore).map(r => r.playerIndex)
+    results.filter((r) => r.finalScore === winnerScore).map((r) => r.playerIndex),
   )
 
   return (
-    <div style={{
-      position: 'fixed',
-      inset: 0,
-      background: 'rgba(0, 0, 0, 0.8)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 1000,
-    }}>
-      <div style={{
-        background: '#16213e',
-        border: '1px solid #0f3460',
-        borderRadius: '12px',
-        padding: '32px',
-        maxWidth: '640px',
-        width: '90%',
-        maxHeight: '90vh',
-        overflowY: 'auto',
-        fontFamily: 'sans-serif',
-        color: '#e0e0e0',
-      }}>
-        <h1 style={{
-          textAlign: 'center',
-          margin: '0 0 24px 0',
-          fontSize: '28px',
-          color: '#f1c40f',
-          letterSpacing: '1px',
-        }}>
+    <Overlay>
+      <Sheet>
+        <h1
+          style={{
+            textAlign: 'center',
+            margin: '0 0 16px',
+            fontFamily: 'var(--font-display)',
+            fontSize: 26,
+            fontWeight: 700,
+            color: 'var(--treasure)',
+            letterSpacing: 1,
+          }}
+        >
           Game Over
         </h1>
 
-        {/* Winner announcement */}
-        <div style={{
-          textAlign: 'center',
-          marginBottom: '24px',
-          fontSize: '18px',
-        }}>
+        <div
+          style={{
+            textAlign: 'center',
+            marginBottom: 20,
+            fontFamily: 'var(--font-body)',
+            fontSize: 16,
+            color: 'var(--ink-light)',
+          }}
+        >
           {winnerIndices.size === 1 ? (
-            <span>
-              <span style={{ color: DYNASTY_COLORS[state.players[results[0].playerIndex].dynasty] }}>
+            <>
+              <span
+                style={{
+                  color: DYNASTY_VAR[state.players[results[0].playerIndex].dynasty],
+                  fontWeight: 700,
+                }}
+              >
                 {DYNASTY_LABELS[state.players[results[0].playerIndex].dynasty]}
+              </span>{' '}
+              wins —{' '}
+              <span style={{ color: 'var(--treasure)', fontWeight: 700 }}>
+                {winnerScore}
               </span>
-              {' '}wins with a score of{' '}
-              <span style={{ color: '#f1c40f', fontWeight: 'bold' }}>{winnerScore}</span>!
-            </span>
+            </>
           ) : (
-            <span>
-              Tie between{' '}
-              {results
-                .filter(r => winnerIndices.has(r.playerIndex))
-                .map((r, i, arr) => (
-                  <span key={r.playerIndex}>
-                    <span style={{ color: DYNASTY_COLORS[state.players[r.playerIndex].dynasty] }}>
-                      {DYNASTY_LABELS[state.players[r.playerIndex].dynasty]}
-                    </span>
-                    {i < arr.length - 1 ? ' and ' : ''}
-                  </span>
-                ))}
-              {' '}with a score of{' '}
-              <span style={{ color: '#f1c40f', fontWeight: 'bold' }}>{winnerScore}</span>!
-            </span>
+            <>
+              Tie —{' '}
+              <span style={{ color: 'var(--treasure)', fontWeight: 700 }}>
+                {winnerScore}
+              </span>
+            </>
           )}
         </div>
 
-        {/* Player cards */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {results.map((result, rank) => {
             const player = state.players[result.playerIndex]
             const isWinner = winnerIndices.has(result.playerIndex)
-            const dynastyColor = DYNASTY_COLORS[player.dynasty]
+            const dynastyColor = DYNASTY_VAR[player.dynasty]
 
             return (
-              <div key={result.playerIndex} style={{
-                background: '#0f1b3e',
-                border: isWinner ? '2px solid #f1c40f' : '1px solid #0f3460',
-                borderRadius: '8px',
-                padding: '16px',
-                boxShadow: isWinner ? '0 0 12px rgba(241, 196, 15, 0.3)' : 'none',
-              }}>
-                {/* Player header */}
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: '12px',
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span style={{ fontSize: '14px', color: '#888' }}>#{rank + 1}</span>
-                    <span style={{
-                      fontSize: '16px',
-                      fontWeight: 'bold',
-                      color: dynastyColor,
-                    }}>
+              <div
+                key={result.playerIndex}
+                style={{
+                  background: 'var(--paper-light)',
+                  border: `1px solid ${isWinner ? 'var(--treasure)' : 'var(--rule)'}`,
+                  padding: 12,
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--ink-faint)',
+                      }}
+                    >
+                      #{rank + 1}
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: 'var(--font-display)',
+                        fontSize: 15,
+                        fontWeight: 700,
+                        color: dynastyColor,
+                      }}
+                    >
                       {DYNASTY_LABELS[player.dynasty]}
                     </span>
                     {isWinner && (
-                      <span style={{ color: '#f1c40f', fontSize: '14px' }}>Winner</span>
+                      <span
+                        style={{
+                          color: 'var(--treasure)',
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 10,
+                          textTransform: 'uppercase',
+                          letterSpacing: 1,
+                        }}
+                      >
+                        Winner
+                      </span>
                     )}
                   </div>
-                  <div style={{
-                    fontSize: '20px',
-                    fontWeight: 'bold',
-                    color: isWinner ? '#f1c40f' : '#e0e0e0',
-                  }}>
+                  <div
+                    style={{
+                      fontFamily: 'var(--font-display)',
+                      fontSize: 22,
+                      fontWeight: 700,
+                      color: isWinner ? 'var(--treasure)' : 'var(--ink)',
+                    }}
+                  >
                     {result.finalScore}
                   </div>
                 </div>
 
-                {/* Score table */}
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'auto repeat(4, 1fr)',
-                  gap: '4px 12px',
-                  fontSize: '13px',
-                }}>
-                  {/* Header row */}
-                  <div style={{ color: '#888' }}></div>
-                  {TILE_COLORS.map(color => (
-                    <div key={color} style={{
-                      color: COLORS[color],
-                      textAlign: 'center',
-                      fontWeight: 'bold',
-                    }}>
-                      {COLOR_LABELS[color]}
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'auto repeat(4, 1fr)',
+                    gap: '4px 10px',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                  }}
+                >
+                  <div style={{ color: 'var(--ink-faint)' }}></div>
+                  {TILE_COLORS.map((c) => (
+                    <div
+                      key={c}
+                      style={{
+                        color: TILE_VAR[c],
+                        textAlign: 'center',
+                        fontWeight: 500,
+                      }}
+                    >
+                      {LABELS[c]}
                     </div>
                   ))}
 
-                  {/* Base scores */}
-                  <div style={{ color: '#888' }}>Base</div>
-                  {TILE_COLORS.map(color => (
-                    <div key={color} style={{ textAlign: 'center' }}>
-                      {player.score[color]}
+                  <div style={{ color: 'var(--ink-faint)' }}>Base</div>
+                  {TILE_COLORS.map((c) => (
+                    <div
+                      key={c}
+                      style={{ textAlign: 'center', color: 'var(--ink-light)' }}
+                    >
+                      {player.score[c]}
                     </div>
                   ))}
 
-                  {/* Treasure bonus */}
                   {player.treasures > 0 && (
                     <>
-                      <div style={{ color: COLORS.treasure }}>+Treasure</div>
-                      {TILE_COLORS.map(color => {
-                        const bonus = result.colorScores[color] - player.score[color]
+                      <div style={{ color: 'var(--treasure)' }}>+T</div>
+                      {TILE_COLORS.map((c) => {
+                        const bonus = result.colorScores[c] - player.score[c]
                         return (
-                          <div key={color} style={{
-                            textAlign: 'center',
-                            color: bonus > 0 ? COLORS.treasure : '#555',
-                          }}>
+                          <div
+                            key={c}
+                            style={{
+                              textAlign: 'center',
+                              color:
+                                bonus > 0
+                                  ? 'var(--treasure)'
+                                  : 'var(--ink-faint)',
+                            }}
+                          >
                             {bonus > 0 ? `+${bonus}` : '-'}
                           </div>
                         )
@@ -185,62 +226,50 @@ export function GameOverScreen({ state, onPlayAgain }: GameOverScreenProps) {
                     </>
                   )}
 
-                  {/* Final scores */}
-                  <div style={{ color: '#ccc', fontWeight: 'bold' }}>Final</div>
-                  {TILE_COLORS.map(color => (
-                    <div key={color} style={{
-                      textAlign: 'center',
-                      fontWeight: 'bold',
-                      color: result.colorScores[color] === result.finalScore ? '#f1c40f' : '#e0e0e0',
-                    }}>
-                      {result.colorScores[color]}
+                  <div style={{ color: 'var(--ink)', fontWeight: 700 }}>Fin</div>
+                  {TILE_COLORS.map((c) => (
+                    <div
+                      key={c}
+                      style={{
+                        textAlign: 'center',
+                        fontWeight: 700,
+                        color:
+                          result.colorScores[c] === result.finalScore
+                            ? 'var(--treasure)'
+                            : 'var(--ink)',
+                      }}
+                    >
+                      {result.colorScores[c]}
                     </div>
                   ))}
                 </div>
-
-                {/* Treasures note */}
-                {player.treasures > 0 && (
-                  <div style={{
-                    marginTop: '8px',
-                    fontSize: '12px',
-                    color: '#888',
-                  }}>
-                    {player.treasures} treasure{player.treasures !== 1 ? 's' : ''} assigned optimally
-                  </div>
-                )}
               </div>
             )
           })}
         </div>
 
-        {/* Play Again button */}
-        <div style={{ textAlign: 'center', marginTop: '24px' }}>
+        <div style={{ textAlign: 'center', marginTop: 20 }}>
           <button
             onClick={onPlayAgain}
             style={{
-              padding: '12px 32px',
-              borderRadius: '8px',
-              border: '2px solid #f1c40f',
+              padding: '14px 32px',
+              minHeight: 52,
+              width: '100%',
+              border: '1px solid var(--treasure)',
               background: 'transparent',
-              color: '#f1c40f',
+              color: 'var(--treasure)',
               cursor: 'pointer',
-              fontSize: '16px',
-              fontWeight: 'bold',
-              fontFamily: 'sans-serif',
-              letterSpacing: '1px',
-              transition: 'background 0.2s',
-            }}
-            onMouseEnter={e => {
-              ;(e.target as HTMLButtonElement).style.background = 'rgba(241, 196, 15, 0.15)'
-            }}
-            onMouseLeave={e => {
-              ;(e.target as HTMLButtonElement).style.background = 'transparent'
+              fontFamily: 'var(--font-mono)',
+              fontSize: 13,
+              fontWeight: 500,
+              textTransform: 'uppercase',
+              letterSpacing: 2,
             }}
           >
             Play Again
           </button>
         </div>
-      </div>
-    </div>
+      </Sheet>
+    </Overlay>
   )
 }

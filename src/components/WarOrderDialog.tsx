@@ -1,18 +1,19 @@
 import { GameState, LeaderColor } from '../engine/types'
+import { Overlay, Sheet, Header } from './ConflictDialog'
 
 interface WarOrderDialogProps {
   state: GameState
   onChooseWarOrder: (color: LeaderColor) => void
 }
 
-const COLOR_HEX: Record<string, string> = {
-  red: '#e74c3c',
-  blue: '#3498db',
-  green: '#2ecc71',
-  black: '#888',
+const TILE_VAR: Record<string, string> = {
+  red: 'var(--tile-red)',
+  blue: 'var(--tile-blue)',
+  green: 'var(--tile-green)',
+  black: 'var(--tile-black)',
 }
 
-const LEADER_LABELS: Record<string, string> = {
+const LABELS: Record<string, string> = {
   red: 'Priest',
   blue: 'Farmer',
   green: 'Trader',
@@ -24,67 +25,55 @@ export function WarOrderDialog({ state, onChooseWarOrder }: WarOrderDialogProps)
   if (!conflict?.pendingWarColors?.length) return null
 
   return (
-    <div style={{
-      position: 'fixed',
-      inset: 0,
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      background: 'rgba(0,0,0,0.7)',
-      zIndex: 1000,
-    }}>
-      <div style={{
-        background: '#1a1a2e',
-        border: '2px solid #0f3460',
-        borderRadius: '12px',
-        padding: '24px 32px',
-        minWidth: '320px',
-        maxWidth: '440px',
-        fontFamily: 'sans-serif',
-        color: '#e0e0e0',
-      }}>
-        <div style={{
-          fontSize: '18px',
-          fontWeight: 'bold',
-          marginBottom: '8px',
-        }}>
-          Choose War to Resolve
+    <Overlay>
+      <Sheet>
+        <Header>Choose War to Resolve</Header>
+        <div
+          style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            color: 'var(--ink-faint)',
+            textTransform: 'uppercase',
+            letterSpacing: 1,
+            marginBottom: 14,
+          }}
+        >
+          Multiple wars triggered. Pick first:
         </div>
 
-        <div style={{ fontSize: '13px', color: '#888', marginBottom: '16px' }}>
-          Multiple wars triggered. Choose which to resolve first:
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {conflict.pendingWarColors.map(color => (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {conflict.pendingWarColors.map((color) => (
             <button
               key={color}
               onClick={() => onChooseWarOrder(color)}
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '10px',
-                padding: '12px 16px',
-                borderRadius: '8px',
-                border: '1px solid #0f3460',
-                background: '#0f1b3e',
-                color: '#e0e0e0',
+                gap: 10,
+                padding: 12,
+                minHeight: 48,
+                border: '1px solid var(--rule)',
+                background: 'var(--paper-light)',
+                color: 'var(--ink)',
                 cursor: 'pointer',
-                fontSize: '14px',
-                fontFamily: 'sans-serif',
+                fontFamily: 'var(--font-body)',
+                fontSize: 14,
+                textAlign: 'left',
               }}
             >
-              <div style={{
-                width: '16px',
-                height: '16px',
-                borderRadius: '50%',
-                background: COLOR_HEX[color],
-              }} />
-              <span>{LEADER_LABELS[color]} War</span>
+              <div
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: '50%',
+                  background: TILE_VAR[color],
+                }}
+              />
+              <span>{LABELS[color]} War</span>
             </button>
           ))}
         </div>
-      </div>
-    </div>
+      </Sheet>
+    </Overlay>
   )
 }
