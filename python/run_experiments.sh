@@ -31,6 +31,7 @@ TSV="results.tsv"
 LOG="run.log"
 TOKENS_JSON="tokens.json"
 TIMEOUT=720  # 12 min kill timeout
+TOURNAMENT_EVERY=8  # refresh persistent Elo via tournament every N experiments
 
 if $DRY_RUN; then
   export TIME_BUDGET=5
@@ -69,6 +70,7 @@ if [[ ! -f "$TOKENS_JSON" ]]; then
 fi
 
 best_win_rate="0.000000"
+best_pool_rate="0.000000"
 
 # --- Helper: run one experiment ---
 run_experiment() {
@@ -81,7 +83,8 @@ run_experiment() {
 extract_results() {
   local wr=$(grep "^win_rate:" "$LOG" 2>/dev/null | awk '{print $2}' || echo "")
   local ms=$(grep "^avg_min_score:" "$LOG" 2>/dev/null | awk '{print $2}' || echo "")
-  echo "${wr:-CRASH} ${ms:-0.0}"
+  local pwr=$(grep "^vs_pool_win_rate:" "$LOG" 2>/dev/null | awk '{print $2}' || echo "")
+  echo "${wr:-CRASH} ${ms:-0.0} ${pwr:-None}"
 }
 
 # --- Helper: log to TSV ---
@@ -198,7 +201,7 @@ for ((run=1; run<=MAX_RUNS; run++)); do
 
   # Run experiment
   if run_experiment; then
-    read -r wr ms <<< "$(extract_results)"
+    read -r wr ms pwr <<< "$(extract_results)"
 
     if [[ "$wr" == "CRASH" ]]; then
       echo ">>> CRASH (no results in log)"
@@ -206,21 +209,37 @@ for ((run=1; run<=MAX_RUNS; run++)); do
       log_result "$commit" "0.000000" "0.0" "crash" "crashed: ${desc}"
       discard_last_experiment
     else
-      echo ">>> Results: win_rate=${wr} avg_min_score=${ms}"
+      echo ">>> Results: win_rate=${wr} avg_min_score=${ms} vs_pool=${pwr}"
 
-      # Compare with best
-      improved=$(python3 -c "print('yes' if float('${wr}') > float('${best_win_rate}') else 'no')")
+      # Improvement criterion: prefer vs-pool win rate when available; fall
+      # back to vs-heuristic. Once a pool exists, league progress is the
+      # signal that matters for self-play "better and better."
+      if [[ "$pwr" != "None" && "$pwr" != "" ]]; then
+        improved=$(python3 -c "print('yes' if float('${pwr}') > float('${best_pool_rate}') else 'no')")
+        criterion="vs_pool"
+        prev="$best_pool_rate"
+        new="$pwr"
+      else
+        improved=$(python3 -c "print('yes' if float('${wr}') > float('${best_win_rate}') else 'no')")
+        criterion="win_rate"
+        prev="$best_win_rate"
+        new="$wr"
+      fi
+
       if [[ "$improved" == "yes" ]]; then
-        echo ">>> IMPROVED! Keeping. (${best_win_rate} -> ${wr})"
+        echo ">>> IMPROVED on ${criterion} (${prev} -> ${new}). Keeping."
         best_win_rate="$wr"
-        log_result "$commit" "$wr" "$ms" "keep" "$desc"
+        if [[ "$pwr" != "None" && "$pwr" != "" ]]; then
+          best_pool_rate="$pwr"
+        fi
+        log_result "$commit" "$wr" "$ms" "keep" "$desc (vs_pool=${pwr})"
         if [[ -f "models/policy_final.pt" ]]; then
           cp "models/policy_final.pt" "models/policy_best.pt"
-          echo ">>> Saved best model to models/policy_best.pt (win_rate=${wr})"
+          echo ">>> Saved best model to models/policy_best.pt"
         fi
       else
-        echo ">>> No improvement (${wr} <= ${best_win_rate}). Discarding."
-        log_result "$commit" "$wr" "$ms" "discard" "$desc"
+        echo ">>> No improvement on ${criterion} (${new} <= ${prev}). Discarding."
+        log_result "$commit" "$wr" "$ms" "discard" "$desc (vs_pool=${pwr})"
         discard_last_experiment
       fi
     fi
@@ -235,6 +254,17 @@ for ((run=1; run<=MAX_RUNS; run++)); do
   echo ">>> Results so far:"
   cat "$TSV"
   echo ""
+
+  # Periodic league refresh: a real round-robin keeps pool ratings honest
+  # rather than relying on each new agent's per-opponent eval (which only
+  # touches the opponent it played, leaving stale ratings on the rest).
+  if (( run % TOURNAMENT_EVERY == 0 )) && [[ -d "models/pool" ]]; then
+    echo ">>> Tournament refresh ($(ls models/pool/policy_*.pt 2>/dev/null | wc -l | tr -d ' ') members)..."
+    python3 python/tournament.py --games-per-pair 2 --max-turns 1200 \
+      >> "$LOG.tournament" 2>&1 || echo ">>> Tournament failed (see $LOG.tournament)"
+    tail -20 "$LOG.tournament" 2>/dev/null || true
+    echo ""
+  fi
 done
 
 echo "=== DONE: ${MAX_RUNS} experiments ==="

@@ -25,3 +25,9 @@ dist-ssr
 __pycache__/
 models/
 *.pt
+
+# RL artifacts: regenerate locally instead of tracking binaries
+public/policy.onnx
+sweep_results.tsv
+results.png
+run.log*

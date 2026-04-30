@@ -9,12 +9,44 @@ import { ConflictDialog } from './components/ConflictDialog'
 import { MonumentDialog } from './components/MonumentDialog'
 import { WarOrderDialog } from './components/WarOrderDialog'
 import { GameOverScreen } from './components/GameOverScreen'
-import { SetupScreen } from './components/SetupScreen'
+import { SetupScreen, AIKind } from './components/SetupScreen'
+import { SwapDialog } from './components/SwapDialog'
 import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from './engine/validation'
-import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS } from './engine/types'
+import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS, GameState, GameAction } from './engine/types'
+import { getAIAction } from './ai/simpleAI'
+import { getRemoteAIAction } from './ai/remotePolicy'
 
 function App() {
   const [gameStarted, setGameStarted] = useState(false)
+  const [swapOpen, setSwapOpen] = useState(false)
+  const [aiKind, setAiKind] = useState<AIKind>('heuristic')
+
+  const policy = useCallback(
+    async (s: GameState): Promise<GameAction> => {
+      if (aiKind === 'hard') {
+        try {
+          return await getRemoteAIAction(s)
+        } catch (err) {
+          console.warn('Remote policy failed, falling back to heuristic:', err)
+          return getAIAction(s)
+        }
+      }
+      if (aiKind === 'onnx') {
+        try {
+          // Lazy-load: pulls in onnxruntime-web (~26 MB WASM) only on demand
+          // so the heuristic-only path keeps a small initial bundle.
+          const { getOnnxAIAction } = await import('./ai/onnxPolicy')
+          return await getOnnxAIAction(s)
+        } catch (err) {
+          console.warn('ONNX policy failed, falling back to heuristic:', err)
+          return getAIAction(s)
+        }
+      }
+      return getAIAction(s)
+    },
+    [aiKind],
+  )
+
   const {
     state,
     dispatch,
@@ -25,7 +57,7 @@ function App() {
     setSelectedLeader,
     setPlacingCatastrophe,
     startNewGame,
-  } = useGame()
+  } = useGame({ getAIAction: policy })
 
   const currentPlayer = state.players[state.currentPlayer]
   const isAITurn = !!currentPlayer.isAI
@@ -50,10 +82,14 @@ function App() {
       return getValidTilePlacements(state, selectedTile)
     }
     if (selectedLeader) {
-      return getValidLeaderPlacements(state, selectedLeader)
+      // If the selected leader is already on the board, validate as a
+      // reposition (lift from current cell first).
+      const currentLeader = currentPlayer.leaders.find(l => l.color === selectedLeader)
+      const from = currentLeader?.position ?? null
+      return getValidLeaderPlacements(state, selectedLeader, from)
     }
     return []
-  }, [state, selectedTile, selectedLeader, placingCatastrophe, isActionPhase])
+  }, [state, selectedTile, selectedLeader, placingCatastrophe, isActionPhase, currentPlayer.leaders])
 
   // Handle cell click on board
   const handleCellClick = useCallback((pos: Position) => {
@@ -92,14 +128,22 @@ function App() {
     }
   }, [isActionPhase, placingCatastrophe, selectedTile, selectedLeader, state.currentPlayer, dispatch, setSelectedTile, setSelectedLeader, setPlacingCatastrophe])
 
-  const handleSwapTiles = useCallback(() => {
-    const indices = currentPlayer.hand.map((_, i) => i)
+  const handleOpenSwap = useCallback(() => {
+    setSwapOpen(true)
+  }, [])
+
+  const handleConfirmSwap = useCallback((indices: number[]) => {
     dispatch({
       type: 'swapTiles',
       indices,
       playerIndex: state.currentPlayer,
     })
-  }, [currentPlayer.hand, state.currentPlayer, dispatch])
+    setSwapOpen(false)
+  }, [state.currentPlayer, dispatch])
+
+  const handleCancelSwap = useCallback(() => {
+    setSwapOpen(false)
+  }, [])
 
   const handlePass = useCallback(() => {
     dispatch({
@@ -154,7 +198,8 @@ function App() {
   }, [state.currentPlayer, dispatch])
 
   if (!gameStarted) {
-    return <SetupScreen onStartGame={(count, flags) => {
+    return <SetupScreen onStartGame={(count, flags, kind) => {
+      setAiKind(kind)
       startNewGame(count, flags)
       setGameStarted(true)
     }} />
@@ -192,7 +237,7 @@ function App() {
         placingCatastrophe={placingCatastrophe}
         onSelectLeader={setSelectedLeader}
         onPlaceCatastrophe={setPlacingCatastrophe}
-        onSwapTiles={handleSwapTiles}
+        onSwapTiles={handleOpenSwap}
         onPass={handlePass}
         onWithdrawLeader={handleWithdrawLeader}
         disabled={!isActionPhase || isAITurn}
@@ -226,6 +271,14 @@ function App() {
         <GameOverScreen
           state={state}
           onPlayAgain={() => setGameStarted(false)}
+        />
+      )}
+
+      {swapOpen && !isAITurn && isActionPhase && (
+        <SwapDialog
+          hand={currentPlayer.hand}
+          onConfirm={handleConfirmSwap}
+          onCancel={handleCancelSwap}
         />
       )}
     </div>

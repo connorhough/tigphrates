@@ -1,7 +1,9 @@
 import { useState } from 'react'
 
+export type AIKind = 'heuristic' | 'hard' | 'onnx'
+
 interface SetupScreenProps {
-  onStartGame: (playerCount: number, aiFlags: boolean[]) => void
+  onStartGame: (playerCount: number, aiFlags: boolean[], aiKind: AIKind) => void
 }
 
 const DYNASTIES = [
@@ -14,6 +16,7 @@ const DYNASTIES = [
 export function SetupScreen({ onStartGame }: SetupScreenProps) {
   const [playerCount, setPlayerCount] = useState(2)
   const [aiFlags, setAiFlags] = useState([false, true, true, true])
+  const [aiKind, setAiKind] = useState<AIKind>('heuristic')
 
   const toggleAI = (index: number) => {
     setAiFlags((prev) => {
@@ -24,7 +27,7 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
   }
 
   const handleStart = () => {
-    onStartGame(playerCount, aiFlags.slice(0, playerCount))
+    onStartGame(playerCount, aiFlags.slice(0, playerCount), aiKind)
   }
 
   return (
@@ -177,6 +180,53 @@ export function SetupScreen({ onStartGame }: SetupScreenProps) {
               </div>
             )
           })}
+        </div>
+
+        <div style={{ marginBottom: 20 }}>
+          <label
+            style={{
+              display: 'block',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              color: 'var(--ink-faint)',
+              textTransform: 'uppercase',
+              letterSpacing: 1.5,
+              marginBottom: 8,
+            }}
+          >
+            AI Difficulty
+          </label>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {([
+              { kind: 'heuristic' as const, label: 'Heuristic',
+                title: 'Built-in heuristic AI (no setup required)' },
+              { kind: 'onnx' as const, label: 'Trained (browser)',
+                title: 'Loads /policy.onnx in-browser via onnxruntime-web. No server needed.' },
+              { kind: 'hard' as const, label: 'Trained (server)',
+                title: 'Requires the local policy server (python/policy_server.py)' },
+            ]).map(({ kind, label, title }) => (
+              <button
+                key={kind}
+                onClick={() => setAiKind(kind)}
+                style={{
+                  flex: '1 1 30%',
+                  padding: '10px',
+                  minHeight: 40,
+                  border: aiKind === kind ? '1px solid var(--accent)' : '1px solid var(--rule)',
+                  background: aiKind === kind ? 'var(--paper-light)' : 'var(--paper)',
+                  color: aiKind === kind ? 'var(--accent)' : 'var(--ink-light)',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
+                  textTransform: 'uppercase',
+                  letterSpacing: 1,
+                  cursor: 'pointer',
+                }}
+                title={title}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <button
