@@ -315,10 +315,16 @@ function handlePlaceLeader(state: GameState, color: LeaderColor, position: Posit
     throw new Error('Cell is not empty')
   }
 
-  // Leader must not already be on board
+  // Leader may come from off-board OR be repositioned from elsewhere on the board.
+  // If repositioning, lift the leader from its current cell first.
   const leaderEntry = player.leaders.find(l => l.color === color)!
   if (leaderEntry.position !== null) {
-    throw new Error(`Leader ${color} is already on board`)
+    const oldPos = leaderEntry.position
+    if (oldPos.row === position.row && oldPos.col === position.col) {
+      throw new Error(`Leader ${color} is already at that position`)
+    }
+    state.board[oldPos.row][oldPos.col].leader = null
+    leaderEntry.position = null
   }
 
   // Must be adjacent to at least one face-up red temple tile

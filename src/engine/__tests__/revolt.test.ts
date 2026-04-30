@@ -44,15 +44,23 @@ describe('placeLeader', () => {
     expect(() => applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 0, col: 10 } })).toThrow()
   })
 
-  it('rejects placement if leader is already on board', () => {
+  it('repositions an on-board leader to a new valid cell', () => {
     const state = setupForLeaderPlacement()
-    // Place red leader first
+    // Place red leader first at (0,9), adjacent to temple (0,10)
     state.board[0][9].leader = { color: 'red', dynasty: 'archer' }
     state.players[0].leaders.find(l => l.color === 'red')!.position = { row: 0, col: 9 }
-    // Try to place same leader again
-    expect(() => applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 0, col: 11 } })).toThrow(
-      /already on board/i
-    )
+    // Reposition to (0,11), also adjacent to temple (0,10)
+    const result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 0, col: 11 } })
+    expect(result.board[0][9].leader).toBeNull()
+    expect(result.board[0][11].leader).toEqual({ color: 'red', dynasty: 'archer' })
+    expect(result.players[0].leaders.find(l => l.color === 'red')!.position).toEqual({ row: 0, col: 11 })
+  })
+
+  it('rejects repositioning a leader to its own current position', () => {
+    const state = setupForLeaderPlacement()
+    state.board[0][9].leader = { color: 'red', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'red')!.position = { row: 0, col: 9 }
+    expect(() => applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 0, col: 9 } })).toThrow()
   })
 
   it('rejects placement that would unite two kingdoms', () => {
@@ -81,6 +89,21 @@ describe('placeLeader', () => {
     const boardBefore = state.board[0][9].leader
     applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 0, col: 9 } })
     expect(state.board[0][9].leader).toBe(boardBefore)
+  })
+
+  it('repositioning into kingdom with same-color enemy leader triggers revolt', () => {
+    const state = setupForLeaderPlacement()
+    // Player 1 (bull) places a red leader at (0,1) adjacent to temple (1,1)
+    state.board[0][1].leader = { color: 'red', dynasty: 'bull' }
+    state.players[1].leaders.find(l => l.color === 'red')!.position = { row: 0, col: 1 }
+    // Player 0 (archer) has red leader off-board; place at (1,0) — same kingdom (both adjacent to temple (1,1)),
+    // triggering a revolt.
+    state.currentPlayer = 0
+    state.actionsRemaining = 2
+    const result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 1, col: 0 } })
+    expect(result.turnPhase).toBe('conflictSupport')
+    expect(result.pendingConflict?.type).toBe('revolt')
+    expect(result.pendingConflict?.color).toBe('red')
   })
 
   it('throws if no actions remaining', () => {

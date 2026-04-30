@@ -110,17 +110,36 @@ export function ActionBar({
             .filter((l) => l.position !== null)
             .map((leader) => {
               const display = LEADER_VAR[leader.color]
+              const isMoveSelected = selectedLeader === leader.color
               return (
-                <button
-                  key={`withdraw-${leader.color}`}
-                  disabled={disabled}
-                  style={{ ...btnBase, opacity: 0.7 }}
-                  onClick={() => onWithdrawLeader(leader.color)}
-                  title={`Withdraw ${display.label}`}
+                <span
+                  key={`onboard-${leader.color}`}
+                  style={{ display: 'inline-flex', gap: 0, flexShrink: 0 }}
                 >
-                  <span style={dot(display.color)} />
-                  Withdraw
-                </button>
+                  <button
+                    disabled={disabled}
+                    style={isMoveSelected ? btnActive : btnBase}
+                    onClick={() => onSelectLeader(isMoveSelected ? null : leader.color)}
+                    title={`Move ${display.label} to a new cell`}
+                  >
+                    <span style={dot(display.color)} />
+                    Move
+                  </button>
+                  <button
+                    disabled={disabled}
+                    style={{
+                      ...btnBase,
+                      opacity: 0.7,
+                      borderLeft: 'none',
+                      paddingLeft: 8,
+                      paddingRight: 8,
+                    }}
+                    onClick={() => onWithdrawLeader(leader.color)}
+                    title={`Withdraw ${display.label}`}
+                  >
+                    Withdraw
+                  </button>
+                </span>
               )
             })}
 

@@ -16,7 +16,18 @@ interface UseGameReturn {
   startNewGame: (playerCount: number, aiFlags?: boolean[]) => void
 }
 
-export function useGame(): UseGameReturn {
+export type AIPolicy = (state: GameState) => GameAction | Promise<GameAction>
+
+interface UseGameOptions {
+  // Override the AI policy. Defaults to the heuristic in src/ai/simpleAI.
+  // Use to plug in a trained model via a bridge call without touching this file.
+  getAIAction?: AIPolicy
+  aiThinkMs?: number
+}
+
+export function useGame(options: UseGameOptions = {}): UseGameReturn {
+  const policy: AIPolicy = options.getAIAction ?? getAIAction
+  const aiThinkMs = options.aiThinkMs ?? 500
   const [state, setState] = useState<GameState>(() => createGame(2))
   const [selectedTile, setSelectedTile] = useState<TileColor | null>(null)
   const [selectedLeader, setSelectedLeader] = useState<LeaderColor | null>(null)
@@ -66,13 +77,22 @@ export function useGame(): UseGameReturn {
     if (!player.isAI) return
     if (state.turnPhase === 'gameOver') return
 
-    const timeout = setTimeout(() => {
-      const action = getAIAction(state)
-      dispatch({ ...action, playerIndex: state.currentPlayer })
-    }, 500)
+    let cancelled = false
+    const timeout = setTimeout(async () => {
+      try {
+        const action = await policy(state)
+        if (cancelled) return
+        dispatch({ ...action, playerIndex: state.currentPlayer })
+      } catch (err) {
+        console.error('AI policy failed:', err)
+      }
+    }, aiThinkMs)
 
-    return () => clearTimeout(timeout)
-  }, [state, dispatch])
+    return () => {
+      cancelled = true
+      clearTimeout(timeout)
+    }
+  }, [state, dispatch, policy, aiThinkMs])
 
   return {
     state,

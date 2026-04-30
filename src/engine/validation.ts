@@ -45,12 +45,30 @@ function wouldUniteThreeOrMoreKingdoms(state: GameState, pos: Position): boolean
   return adjacentKingdomIndices.size >= 3
 }
 
-export function getValidLeaderPlacements(state: GameState, _color: string): Position[] {
+export function getValidLeaderPlacements(
+  state: GameState,
+  _color: string,
+  repositioningFrom?: Position | null,
+): Position[] {
   const validPositions: Position[] = []
+  // For repositioning, evaluate validity as if the leader has already been
+  // lifted from `repositioningFrom`. Lifting can change kingdom topology
+  // (a kingdom that only existed because of this leader stops being one),
+  // which affects the "would unite ≥2 kingdoms" check.
+  const board = repositioningFrom
+    ? boardWithoutLeaderAt(state.board, repositioningFrom)
+    : state.board
 
   for (let row = 0; row < BOARD_ROWS; row++) {
     for (let col = 0; col < BOARD_COLS; col++) {
-      const cell = state.board[row][col]
+      // Skip the leader's own current position when repositioning.
+      if (
+        repositioningFrom &&
+        repositioningFrom.row === row &&
+        repositioningFrom.col === col
+      ) continue
+
+      const cell = board[row][col]
 
       // Must be empty land cell
       if (cell.terrain !== 'land') continue
@@ -62,13 +80,13 @@ export function getValidLeaderPlacements(state: GameState, _color: string): Posi
       // Must be adjacent to at least one face-up red temple tile
       const neighbors = getNeighbors({ row, col })
       const adjacentToTemple = neighbors.some(n => {
-        const c = state.board[n.row][n.col]
+        const c = board[n.row][n.col]
         return c.tile === 'red' && !c.tileFlipped
       })
       if (!adjacentToTemple) continue
 
-      // Must not unite 2+ kingdoms
-      if (wouldLeaderUniteTwoOrMoreKingdoms(state, { row, col })) continue
+      // Must not unite 2+ kingdoms (computed against the lifted-board view).
+      if (wouldLeaderUniteTwoOrMoreKingdomsOn(board, { row, col })) continue
 
       validPositions.push({ row, col })
     }
@@ -77,10 +95,24 @@ export function getValidLeaderPlacements(state: GameState, _color: string): Posi
   return validPositions
 }
 
-function wouldLeaderUniteTwoOrMoreKingdoms(state: GameState, pos: Position): boolean {
-  // A leader connects to adjacent tiles/leaders. If adjacent cells belong to
-  // two different kingdoms, placing a leader here would unite them.
-  const kingdoms = findKingdoms(state.board)
+function boardWithoutLeaderAt(
+  board: GameState['board'],
+  pos: Position,
+): GameState['board'] {
+  return board.map((row, ri) =>
+    ri === pos.row
+      ? row.map((cell, ci) =>
+          ci === pos.col ? { ...cell, leader: null } : cell,
+        )
+      : row,
+  )
+}
+
+function wouldLeaderUniteTwoOrMoreKingdomsOn(
+  board: GameState['board'],
+  pos: Position,
+): boolean {
+  const kingdoms = findKingdoms(board)
   if (kingdoms.length < 2) return false
 
   const adjacentKingdomIndices = new Set<number>()

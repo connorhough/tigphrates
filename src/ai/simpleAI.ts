@@ -1,7 +1,9 @@
 import { GameState, GameAction, TileColor, LeaderColor, Position } from '../engine/types'
-import { getValidTilePlacements, getValidLeaderPlacements } from '../engine/validation'
+import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from '../engine/validation'
 import { findKingdoms, getNeighbors } from '../engine/board'
-import { countAdjacentTemples } from '../engine/conflict'
+import { countAdjacentTemples, countWarSupportTiles } from '../engine/conflict'
+
+const CATASTROPHE_MIN_TARGET_TILES = 3
 
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 
@@ -28,7 +30,6 @@ function handleConflictSupport(state: GameState): GameAction {
   const conflict = state.pendingConflict
   if (!conflict) return { type: 'commitSupport', indices: [] }
 
-  // Determine who is committing: attacker first, then defender
   const isAttackerTurn = conflict.attackerCommitted === null
   const playerIndex = isAttackerTurn
     ? conflict.attacker.playerIndex
@@ -36,7 +37,6 @@ function handleConflictSupport(state: GameState): GameAction {
   const player = state.players[playerIndex]
   const supportColor: TileColor = conflict.type === 'revolt' ? 'red' : conflict.color as TileColor
 
-  // Find indices of matching tiles in hand
   const matchingIndices: number[] = []
   for (let i = 0; i < player.hand.length; i++) {
     if (player.hand[i] === supportColor) {
@@ -44,44 +44,51 @@ function handleConflictSupport(state: GameState): GameAction {
     }
   }
 
-  // Use already-determined attacker/defender status
   const isAttacker = isAttackerTurn
   const myStrength = isAttacker ? conflict.attackerStrength : conflict.defenderStrength
   const opponentStrength = isAttacker ? conflict.defenderStrength : conflict.attackerStrength
-
-  // If opponent hasn't committed yet, commit all matching tiles to maximize chances
   const opponentCommitted = isAttacker ? conflict.defenderCommitted : conflict.attackerCommitted
+
   if (opponentCommitted === null) {
-    // Don't know opponent's commitment yet - commit all to be safe if we have a chance
-    if (matchingIndices.length > 0) {
-      return { type: 'commitSupport', indices: matchingIndices }
+    // Attacker committing first. Bound defender's worst-case commit by their
+    // visible matching-color hand count. Commit minimum to beat that ceiling;
+    // otherwise commit zero so we don't burn hand on an unwinnable conflict.
+    const oppPlayerIndex = isAttacker
+      ? conflict.defender.playerIndex
+      : conflict.attacker.playerIndex
+    const oppMaxCommit = state.players[oppPlayerIndex].hand
+      .filter(t => t === supportColor).length
+    const oppCeiling = opponentStrength + oppMaxCommit
+    const myMaxTotal = myStrength + matchingIndices.length
+
+    if (myMaxTotal > oppCeiling) {
+      const needed = oppCeiling - myStrength + 1
+      const toCommit = matchingIndices.slice(0, Math.max(0, needed))
+      return { type: 'commitSupport', indices: toCommit }
     }
+    // Cannot beat defender's worst case. Defender wins ties — don't waste tiles.
     return { type: 'commitSupport', indices: [] }
   }
 
-  // Opponent has committed - calculate if we can win
+  // Opponent already committed — exact calculation.
   const opponentTotal = opponentStrength + opponentCommitted.length
   const myPotentialTotal = myStrength + matchingIndices.length
 
   if (myPotentialTotal > opponentTotal) {
-    // We can win - commit just enough to win
     const needed = opponentTotal - myStrength + 1
     const toCommit = matchingIndices.slice(0, Math.max(0, needed))
     return { type: 'commitSupport', indices: toCommit }
   }
 
-  // Can't win - don't waste tiles
   return { type: 'commitSupport', indices: [] }
 }
 
 function handleMonumentChoice(state: GameState): GameAction {
-  // Always build if possible - monuments are valuable
   const pending = state.pendingMonument
   if (!pending) return { type: 'declineMonument' }
 
-  // Find an available monument that uses the pending color
   for (const monument of state.monuments) {
-    if (monument.position !== null) continue // already placed
+    if (monument.position !== null) continue
     if (monument.color1 === pending.color || monument.color2 === pending.color) {
       return { type: 'buildMonument', monumentId: monument.id }
     }
@@ -93,21 +100,54 @@ function handleMonumentChoice(state: GameState): GameAction {
 function handleWarOrderChoice(state: GameState): GameAction {
   const conflict = state.pendingConflict
   if (!conflict?.pendingWarColors?.length) {
-    // Fallback: pick any color
     return { type: 'chooseWarOrder', color: 'red' }
   }
 
   const player = state.players[state.currentPlayer]
   const pending = conflict.pendingWarColors
+  const unificationPos = conflict.unificationTilePosition
 
-  // Pick the color where AI has the most tiles in hand (strongest advantage)
-  let bestColor = pending[0]
-  let bestCount = -1
+  let bestColor: LeaderColor = pending[0]
+  let bestScore = -Infinity
 
   for (const color of pending) {
-    const count = player.hand.filter(t => t === color).length
-    if (count > bestCount) {
-      bestCount = count
+    // Find the two opposing leaders of this color.
+    const leadersOnBoard: { playerIndex: number; pos: Position }[] = []
+    for (let pi = 0; pi < state.players.length; pi++) {
+      const entry = state.players[pi].leaders.find(l => l.color === color)
+      if (entry?.position) {
+        leadersOnBoard.push({ playerIndex: pi, pos: entry.position })
+      }
+    }
+
+    let myAdvantage: number
+    if (unificationPos && leadersOnBoard.length >= 2) {
+      const attackerEntry =
+        leadersOnBoard.find(l => l.playerIndex === state.currentPlayer) ?? leadersOnBoard[0]
+      const defenderEntry = leadersOnBoard.find(l => l !== attackerEntry)!
+      const attackerStrength = countWarSupportTiles(
+        state.board,
+        attackerEntry.pos,
+        color as TileColor,
+        unificationPos,
+        defenderEntry.pos,
+      )
+      const defenderStrength = countWarSupportTiles(
+        state.board,
+        defenderEntry.pos,
+        color as TileColor,
+        unificationPos,
+        attackerEntry.pos,
+      )
+      const myHandCount = player.hand.filter(t => t === color).length
+      myAdvantage = (attackerStrength + myHandCount) - defenderStrength
+    } else {
+      // Fallback: hand count only.
+      myAdvantage = player.hand.filter(t => t === color).length
+    }
+
+    if (myAdvantage > bestScore) {
+      bestScore = myAdvantage
       bestColor = color
     }
   }
@@ -119,25 +159,31 @@ function handleActionPhase(state: GameState): GameAction {
   const player = state.players[state.currentPlayer]
   const onBoardLeaders = player.leaders.filter(l => l.position !== null)
 
-  // Priority 1: Place leaders if none on board
   if (onBoardLeaders.length === 0) {
     const action = tryPlaceLeader(state, player)
     if (action) return action
   }
 
-  // Priority 2: Place tile where own leader scores
   if (onBoardLeaders.length > 0) {
     const action = tryPlaceScoringTile(state, player)
     if (action) return action
   }
 
-  // Priority 3: Place more leaders if opportunity exists
   if (onBoardLeaders.length < 4) {
     const action = tryPlaceLeader(state, player)
     if (action) return action
   }
 
-  // Priority 4: Swap tiles if hand has no tiles matching on-board leaders
+  // Catastrophe: only when there's a high-value disruption target. Picks
+  // an opponent kingdom where they have a leader collecting VP for a color
+  // we cannot contest (we have no leader of that color), and removes the
+  // highest-leverage face-up tile.
+  if (player.catastrophesRemaining > 0) {
+    const action = tryPlaceCatastrophe(state, player)
+    if (action) return action
+  }
+
+  // Swap if hand has nothing useful for current on-board leaders.
   if (onBoardLeaders.length > 0 && player.hand.length > 0) {
     const onBoardColors = new Set(onBoardLeaders.map(l => l.color))
     const hasMatchingTile = player.hand.some(t => onBoardColors.has(t))
@@ -147,11 +193,15 @@ function handleActionPhase(state: GameState): GameAction {
     }
   }
 
-  // Priority 5: Place any valid tile (even if not directly scoring)
   const anyTileAction = tryPlaceAnyTile(state, player)
   if (anyTileAction) return anyTileAction
 
-  // Last resort: pass
+  // Prefer swap over pass when stuck.
+  if (player.hand.length > 0) {
+    const indices = player.hand.map((_, i) => i)
+    return { type: 'swapTiles', indices }
+  }
+
   return { type: 'pass' }
 }
 
@@ -167,14 +217,12 @@ function findRevoltDefender(
   const kingdoms = findKingdoms(state.board)
   const playerLeaderDynasty = state.players[state.currentPlayer].dynasty
 
-  // Which kingdoms are adjacent to this placement?
   const neighbors = getNeighbors(placementPos)
   for (const kingdom of kingdoms) {
     const posSet = new Set(kingdom.positions.map(p => `${p.row},${p.col}`))
     const isAdjacent = neighbors.some(n => posSet.has(`${n.row},${n.col}`))
     if (!isAdjacent) continue
 
-    // Does this kingdom have a same-color leader from a different dynasty?
     const conflictLeader = kingdom.leaders.find(
       l => l.color === color && l.dynasty !== playerLeaderDynasty,
     )
@@ -183,36 +231,88 @@ function findRevoltDefender(
   return null
 }
 
+interface KingdomLite {
+  positions: Position[]
+  posKeySet: Set<string>
+  leaders: { color: LeaderColor; dynasty: string }[]
+  treasureCount: number
+  tileCount: number
+}
+
+function summarizeKingdoms(state: GameState): KingdomLite[] {
+  const kingdoms = findKingdoms(state.board)
+  return kingdoms.map(k => {
+    const posKeySet = new Set(k.positions.map(p => `${p.row},${p.col}`))
+    let treasureCount = 0
+    let tileCount = 0
+    for (const pos of k.positions) {
+      const cell = state.board[pos.row][pos.col]
+      if (cell.hasTreasure) treasureCount++
+      if (cell.tile !== null) tileCount++
+    }
+    return {
+      positions: k.positions,
+      posKeySet,
+      leaders: k.leaders.map(l => ({ color: l.color, dynasty: l.dynasty })),
+      treasureCount,
+      tileCount,
+    }
+  })
+}
+
+function adjacentKingdomFor(pos: Position, kingdoms: KingdomLite[]): KingdomLite | null {
+  const neighbors = getNeighborPositions(pos)
+  for (const k of kingdoms) {
+    if (neighbors.some(n => k.posKeySet.has(`${n.row},${n.col}`))) return k
+  }
+  return null
+}
+
 function tryPlaceLeader(
   state: GameState,
   player: GameState['players'][number],
 ): GameAction | null {
-  // Count tiles per color in hand
   const colorCounts: Record<string, number> = {}
   for (const tile of player.hand) {
     colorCounts[tile] = (colorCounts[tile] || 0) + 1
   }
 
-  // Sort off-board leaders by tile count in hand (prefer colors with more tiles)
   const offBoardLeaders = player.leaders
     .filter(l => l.position === null)
     .sort((a, b) => (colorCounts[b.color] || 0) - (colorCounts[a.color] || 0))
 
+  const kingdoms = summarizeKingdoms(state)
+
   for (const leader of offBoardLeaders) {
     const validPlacements = getValidLeaderPlacements(state, leader.color)
+    if (validPlacements.length === 0) continue
 
+    // Score each placement. Reject placements that lose a revolt; otherwise
+    // prefer kingdoms with treasures, more tiles, more adjacent temples (red
+    // strength buffer), and bias green leader strongly toward treasure clusters.
+    type Scored = { pos: Position; score: number }
+    const scored: Scored[] = []
     for (const pos of validPlacements) {
       const defenderPos = findRevoltDefender(state, leader.color, pos)
       if (defenderPos !== null) {
-        // Revolt would be triggered — only proceed if we can win
         const myStrength = countAdjacentTemples(state.board, pos)
         const defenderStrength = countAdjacentTemples(state.board, defenderPos)
         const myRedTiles = player.hand.filter(t => t === 'red').length
-        // Defender wins ties, so we need strict majority
         if (myStrength + myRedTiles <= defenderStrength) continue
       }
-      return { type: 'placeLeader', color: leader.color, position: pos }
+
+      const adjKingdom = adjacentKingdomFor(pos, kingdoms)
+      const treasureCount = adjKingdom?.treasureCount ?? 0
+      const tileCount = adjKingdom?.tileCount ?? 0
+      const templeAdj = countAdjacentTemples(state.board, pos)
+      const treasureWeight = leader.color === 'green' ? 4 : 2
+      const score = treasureWeight * treasureCount + 0.5 * tileCount + templeAdj
+      scored.push({ pos, score })
     }
+
+    if (scored.length === 0) continue
+    scored.sort((a, b) => b.score - a.score)
+    return { type: 'placeLeader', color: leader.color, position: scored[0].pos }
   }
 
   return null
@@ -222,53 +322,66 @@ function tryPlaceScoringTile(
   state: GameState,
   player: GameState['players'][number],
 ): GameAction | null {
-  const kingdoms = findKingdoms(state.board)
   const dynasty = player.dynasty
   const onBoardLeaders = player.leaders.filter(l => l.position !== null)
-
-  // Find colors where AI has leaders on board
   const leaderColors = new Set(onBoardLeaders.map(l => l.color))
+  const kingdoms = summarizeKingdoms(state)
 
-  // Sort by weakest score first (try to balance VP)
+  // Sort by weakest score first (balance VP across colors).
   const sortedColors = [...leaderColors].sort(
     (a, b) => (player.score[a] || 0) - (player.score[b] || 0),
   )
 
   for (const color of sortedColors) {
-    // Check if AI has tiles of this color in hand
     const tileIndex = player.hand.indexOf(color as TileColor)
     if (tileIndex === -1) continue
 
     const validPlacements = getValidTilePlacements(state, color as TileColor)
     if (validPlacements.length === 0) continue
 
-    // Find a placement adjacent to a kingdom containing AI's leader of this color
     const leaderInfo = onBoardLeaders.find(l => l.color === color)
     if (!leaderInfo?.position) continue
 
-    // Find the kingdom containing this leader
     const leaderKingdom = kingdoms.find(k =>
       k.leaders.some(l => l.dynasty === dynasty && l.color === color),
     )
 
     if (leaderKingdom) {
-      // Prefer placements adjacent to this kingdom
-      const kingdomPosSet = new Set(
-        leaderKingdom.positions.map(p => `${p.row},${p.col}`),
-      )
-
-      const adjacentPlacement = validPlacements.find(pos => {
+      // Rank placements adjacent to my leader's kingdom: prefer ones whose
+      // *other* neighbors are also tiles (kingdom growth, monument seed) and
+      // any placement that adds to a kingdom holding treasures.
+      type Scored = { pos: Position; score: number }
+      const adjacent: Scored[] = []
+      for (const pos of validPlacements) {
         const neighbors = getNeighborPositions(pos)
-        return neighbors.some(n => kingdomPosSet.has(`${n.row},${n.col}`))
-      })
+        const onLeaderKingdom = neighbors.some(n =>
+          leaderKingdom.posKeySet.has(`${n.row},${n.col}`),
+        )
+        if (!onLeaderKingdom) continue
 
-      if (adjacentPlacement) {
-        return { type: 'placeTile', color: color as TileColor, position: adjacentPlacement }
+        let neighborTiles = 0
+        let sameColorNeighbors = 0
+        for (const n of neighbors) {
+          const cell = state.board[n.row][n.col]
+          if (cell.tile !== null || cell.leader !== null || cell.monument !== null) {
+            neighborTiles++
+          }
+          if (cell.tile === color) sameColorNeighbors++
+        }
+        // Strongly favor monument 2x2 seeds (same-color neighbors).
+        const score = 4 * sameColorNeighbors + neighborTiles + 0.5 * leaderKingdom.treasureCount
+        adjacent.push({ pos, score })
+      }
+
+      if (adjacent.length > 0) {
+        adjacent.sort((a, b) => b.score - a.score)
+        return { type: 'placeTile', color: color as TileColor, position: adjacent[0].pos }
       }
     }
 
-    // Fallback: place anywhere valid
-    return { type: 'placeTile', color: color as TileColor, position: validPlacements[0] }
+    // Fallback: pick the placement that grows an existing kingdom the most.
+    const ranked = rankByConnectivity(state, validPlacements)
+    return { type: 'placeTile', color: color as TileColor, position: ranked[0] }
   }
 
   return null
@@ -281,11 +394,98 @@ function tryPlaceAnyTile(
   for (const color of TILE_COLORS) {
     if (!player.hand.includes(color)) continue
     const placements = getValidTilePlacements(state, color)
-    if (placements.length > 0) {
-      return { type: 'placeTile', color, position: placements[0] }
-    }
+    if (placements.length === 0) continue
+    const ranked = rankByConnectivity(state, placements)
+    return { type: 'placeTile', color, position: ranked[0] }
   }
   return null
+}
+
+/**
+ * Pick a catastrophe placement that disrupts a strong opponent VP pipeline
+ * we can't otherwise contest. Returns null if no high-leverage target.
+ */
+function tryPlaceCatastrophe(
+  state: GameState,
+  player: GameState['players'][number],
+): GameAction | null {
+  const myDynasty = player.dynasty
+  const myLeaderColors = new Set(
+    player.leaders.filter(l => l.position !== null).map(l => l.color),
+  )
+  const kingdoms = findKingdoms(state.board)
+
+  type Target = { pos: Position; weight: number }
+  let best: Target | null = null
+
+  for (const kingdom of kingdoms) {
+    // Find opponent leaders in this kingdom by color.
+    const oppLeaderColors = new Set(
+      kingdom.leaders
+        .filter(l => l.dynasty !== myDynasty)
+        .map(l => l.color),
+    )
+    if (oppLeaderColors.size === 0) continue
+
+    for (const color of oppLeaderColors) {
+      // Only target colors we cannot contest by tile placement.
+      if (myLeaderColors.has(color)) continue
+
+      // Count face-up tiles of this color in the kingdom.
+      const colorPositions: Position[] = []
+      for (const pos of kingdom.positions) {
+        const cell = state.board[pos.row][pos.col]
+        if (cell.tile === color && !cell.tileFlipped) {
+          colorPositions.push(pos)
+        }
+      }
+      if (colorPositions.length < CATASTROPHE_MIN_TARGET_TILES) continue
+
+      // Choose a single target: highest-leverage face-up tile that's a legal
+      // catastrophe placement (no treasure, no adjacent leader, etc).
+      for (const pos of colorPositions) {
+        if (!canPlaceCatastrophe(state, pos)) continue
+        // Skip cells adjacent to one of MY leaders — destroying my own scoring base.
+        const neighbors = getNeighborPositions(pos)
+        const adjMyLeader = neighbors.some(n => {
+          const c = state.board[n.row][n.col]
+          return c.leader !== null && c.leader.dynasty === myDynasty
+        })
+        if (adjMyLeader) continue
+
+        const weight = colorPositions.length + (color === 'red' ? 1 : 0)
+        if (!best || weight > best.weight) {
+          best = { pos, weight }
+        }
+      }
+    }
+  }
+
+  if (!best) return null
+  return { type: 'placeCatastrophe', position: best.pos }
+}
+
+/**
+ * Rank tile placements by adjacency to existing tiles/leaders. Heads off
+ * one-tile islands in remote corners.
+ */
+function rankByConnectivity(state: GameState, placements: Position[]): Position[] {
+  const scored = placements.map(pos => {
+    const neighbors = getNeighborPositions(pos)
+    let occupied = 0
+    let sameColor = 0
+    const here = state.board[pos.row][pos.col].tile
+    for (const n of neighbors) {
+      const cell = state.board[n.row][n.col]
+      if (cell.tile !== null || cell.leader !== null || cell.monument !== null) {
+        occupied++
+      }
+      if (here && cell.tile === here) sameColor++
+    }
+    return { pos, score: 2 * occupied + 4 * sameColor }
+  })
+  scored.sort((a, b) => b.score - a.score)
+  return scored.map(s => s.pos)
 }
 
 function getNeighborPositions(pos: Position): Position[] {
