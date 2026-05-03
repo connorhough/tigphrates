@@ -1,6 +1,14 @@
 import { GameState, GameAction } from '../engine/types'
 
-const DEFAULT_URL = 'http://127.0.0.1:8765/action'
+// Same-host derivation as src/lab/labApi.ts so Tailscale / LAN viewers reach
+// the policy server bound to 0.0.0.0:8765 on the host they're already
+// connected to (instead of their own loopback).
+function defaultUrl(): string {
+  if (typeof window === 'undefined') return 'http://127.0.0.1:8765/action'
+  const { protocol, hostname } = window.location
+  return `${protocol}//${hostname}:8765/action`
+}
+const DEFAULT_URL = defaultUrl()
 
 /**
  * Calls the local Python policy server (see python/policy_server.py) with

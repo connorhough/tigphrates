@@ -26,7 +26,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tigphrates_env import BridgeProcess
-from train import PolicyValueNetwork, obs_to_tensors, DEVICE
+from train import PolicyValueNetwork, obs_to_tensors, DEVICE, _adapt_state_dict
 from policy_server import _build_policy_obs
 from evaluate import _load_elo_table, ELO_BASELINE
 
@@ -74,16 +74,29 @@ def gather_sample(bridge: BridgeProcess, n_obs: int) -> list[dict]:
 def compute_action_probs(model: torch.nn.Module, samples: list[dict]) -> np.ndarray:
     """Run model over all samples, return shape (n_samples, n_actions) of
     masked softmax probabilities."""
-    n = len(samples)
+    from train import TYPE_BASES, TYPE_PARAM_SIZES, NUM_ACTION_TYPES
+    flat_size = sum(TYPE_PARAM_SIZES)
     probs = []
     for s in samples:
         obs_t = obs_to_tensors(s["obs"])
-        mask = torch.tensor(s["mask"], dtype=torch.bool).unsqueeze(0)
+        mask = np.array(s["mask"], dtype=np.int8)
         with torch.no_grad():
-            logits, _ = model.forward(obs_t)
-            logits = logits.masked_fill(~mask, float("-inf"))
-            p = F.softmax(logits, dim=-1)
-        probs.append(p.squeeze(0).cpu().numpy())
+            type_logits, param_logits, _ = model.forward(obs_t)
+            type_dist, param_padded, _type_mask = model.hierarchical_dists(
+                type_logits, param_logits, mask
+            )
+            # Reconstruct the joint distribution over the flat 1728-action
+            # space: P(flat) = P(type=t(flat)) * P(param=p(flat) | type).
+            # Lets the diversity metric stay comparable to pre-11.1 outputs.
+            type_probs = type_dist.probs.squeeze(0).cpu().numpy()  # (NT,)
+            param_probs_padded = F.softmax(param_padded.squeeze(0), dim=-1).cpu().numpy()
+            param_probs_padded = np.nan_to_num(param_probs_padded, nan=0.0)
+        flat = np.zeros(flat_size, dtype=np.float32)
+        for t in range(NUM_ACTION_TYPES):
+            base = TYPE_BASES[t]
+            size = TYPE_PARAM_SIZES[t]
+            flat[base:base + size] = type_probs[t] * param_probs_padded[t, :size]
+        probs.append(flat)
     return np.stack(probs, axis=0)
 
 
@@ -119,7 +132,8 @@ def main():
     probs_per: dict[str, np.ndarray] = {}
     for p in paths:
         m = PolicyValueNetwork()
-        m.load_state_dict(torch.load(p, map_location="cpu"))
+        raw = torch.load(p, map_location="cpu")
+        m.load_state_dict(_adapt_state_dict(raw), strict=False)
         m.train(False)
         m.to(DEVICE)
         probs_per[p.stem] = compute_action_probs(m, samples)

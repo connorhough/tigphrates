@@ -9,42 +9,43 @@ import { ConflictDialog } from './components/ConflictDialog'
 import { MonumentDialog } from './components/MonumentDialog'
 import { WarOrderDialog } from './components/WarOrderDialog'
 import { GameOverScreen } from './components/GameOverScreen'
-import { SetupScreen, AIKind } from './components/SetupScreen'
+import { SetupScreen } from './components/SetupScreen'
+import { LabScreen } from './components/LabScreen'
 import { SwapDialog } from './components/SwapDialog'
 import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from './engine/validation'
 import { Position, LeaderColor, BOARD_ROWS, BOARD_COLS, GameState, GameAction } from './engine/types'
+import { activePlayerIndex } from './bridge/encoder'
 import { getAIAction } from './ai/simpleAI'
 import { getRemoteAIAction } from './ai/remotePolicy'
+import { SeatPolicy, DEFAULT_HEURISTIC, DEFAULT_HUMAN } from './types/seatPolicy'
+
+type View = 'setup' | 'lab' | 'game'
 
 function App() {
-  const [gameStarted, setGameStarted] = useState(false)
+  const [view, setView] = useState<View>('setup')
   const [swapOpen, setSwapOpen] = useState(false)
-  const [aiKind, setAiKind] = useState<AIKind>('heuristic')
+  const [seatPolicies, setSeatPolicies] = useState<SeatPolicy[]>([
+    DEFAULT_HUMAN, DEFAULT_HEURISTIC,
+  ])
 
+  // Per-seat policy dispatch. Uses the active player so commit-support
+  // sub-phases route to the correct seat's AI (not state.currentPlayer).
   const policy = useCallback(
     async (s: GameState): Promise<GameAction> => {
-      if (aiKind === 'hard') {
-        try {
-          return await getRemoteAIAction(s)
-        } catch (err) {
-          console.warn('Remote policy failed, falling back to heuristic:', err)
-          return getAIAction(s)
-        }
-      }
-      if (aiKind === 'onnx') {
-        try {
-          // Lazy-load: pulls in onnxruntime-web (~26 MB WASM) only on demand
-          // so the heuristic-only path keeps a small initial bundle.
+      const idx = activePlayerIndex(s)
+      const sp = seatPolicies[idx] ?? DEFAULT_HEURISTIC
+      try {
+        if (sp.kind === 'server') return await getRemoteAIAction(s)
+        if (sp.kind === 'onnx') {
           const { getOnnxAIAction } = await import('./ai/onnxPolicy')
-          return await getOnnxAIAction(s)
-        } catch (err) {
-          console.warn('ONNX policy failed, falling back to heuristic:', err)
-          return getAIAction(s)
+          return await getOnnxAIAction(s, sp.modelUrl)
         }
+      } catch (err) {
+        console.warn(`Seat ${idx} policy (${sp.kind}) failed, falling back to heuristic:`, err)
       }
       return getAIAction(s)
     },
-    [aiKind],
+    [seatPolicies],
   )
 
   const {
@@ -63,11 +64,9 @@ function App() {
   const isAITurn = !!currentPlayer.isAI
   const isActionPhase = state.turnPhase === 'action'
 
-  // Compute valid placements for highlighting
   const highlights = useMemo<Position[]>(() => {
     if (!isActionPhase) return []
     if (placingCatastrophe) {
-      // Highlight all cells where catastrophe can be placed
       const valid: Position[] = []
       for (let row = 0; row < BOARD_ROWS; row++) {
         for (let col = 0; col < BOARD_COLS; col++) {
@@ -82,8 +81,6 @@ function App() {
       return getValidTilePlacements(state, selectedTile)
     }
     if (selectedLeader) {
-      // If the selected leader is already on the board, validate as a
-      // reposition (lift from current cell first).
       const currentLeader = currentPlayer.leaders.find(l => l.color === selectedLeader)
       const from = currentLeader?.position ?? null
       return getValidLeaderPlacements(state, selectedLeader, from)
@@ -91,118 +88,75 @@ function App() {
     return []
   }, [state, selectedTile, selectedLeader, placingCatastrophe, isActionPhase, currentPlayer.leaders])
 
-  // Handle cell click on board
   const handleCellClick = useCallback((pos: Position) => {
     if (!isActionPhase) return
-
     if (placingCatastrophe) {
-      dispatch({
-        type: 'placeCatastrophe',
-        position: pos,
-        playerIndex: state.currentPlayer,
-      })
+      dispatch({ type: 'placeCatastrophe', position: pos, playerIndex: state.currentPlayer })
       setPlacingCatastrophe(false)
       return
     }
-
     if (selectedTile) {
-      dispatch({
-        type: 'placeTile',
-        color: selectedTile,
-        position: pos,
-        playerIndex: state.currentPlayer,
-      })
+      dispatch({ type: 'placeTile', color: selectedTile, position: pos, playerIndex: state.currentPlayer })
       setSelectedTile(null)
       return
     }
-
     if (selectedLeader) {
-      dispatch({
-        type: 'placeLeader',
-        color: selectedLeader,
-        position: pos,
-        playerIndex: state.currentPlayer,
-      })
+      dispatch({ type: 'placeLeader', color: selectedLeader, position: pos, playerIndex: state.currentPlayer })
       setSelectedLeader(null)
       return
     }
   }, [isActionPhase, placingCatastrophe, selectedTile, selectedLeader, state.currentPlayer, dispatch, setSelectedTile, setSelectedLeader, setPlacingCatastrophe])
 
-  const handleOpenSwap = useCallback(() => {
-    setSwapOpen(true)
-  }, [])
-
+  const handleOpenSwap = useCallback(() => setSwapOpen(true), [])
   const handleConfirmSwap = useCallback((indices: number[]) => {
-    dispatch({
-      type: 'swapTiles',
-      indices,
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'swapTiles', indices, playerIndex: state.currentPlayer })
     setSwapOpen(false)
   }, [state.currentPlayer, dispatch])
-
-  const handleCancelSwap = useCallback(() => {
-    setSwapOpen(false)
-  }, [])
-
+  const handleCancelSwap = useCallback(() => setSwapOpen(false), [])
   const handlePass = useCallback(() => {
-    dispatch({
-      type: 'pass',
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'pass', playerIndex: state.currentPlayer })
   }, [state.currentPlayer, dispatch])
-
   const handleCommitSupport = useCallback((indices: number[]) => {
-    // Determine who is committing
     const conflict = state.pendingConflict
     if (!conflict) return
     const committingPlayer = conflict.attackerCommitted === null
       ? conflict.attacker.playerIndex
       : conflict.defender.playerIndex
-    dispatch({
-      type: 'commitSupport',
-      indices,
-      playerIndex: committingPlayer,
-    })
+    dispatch({ type: 'commitSupport', indices, playerIndex: committingPlayer })
   }, [state.pendingConflict, dispatch])
-
   const handleBuildMonument = useCallback((monumentId: string) => {
-    dispatch({
-      type: 'buildMonument',
-      monumentId,
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'buildMonument', monumentId, playerIndex: state.currentPlayer })
   }, [state.currentPlayer, dispatch])
-
   const handleDeclineMonument = useCallback(() => {
-    dispatch({
-      type: 'declineMonument',
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'declineMonument', playerIndex: state.currentPlayer })
   }, [state.currentPlayer, dispatch])
-
   const handleChooseWarOrder = useCallback((color: LeaderColor) => {
-    dispatch({
-      type: 'chooseWarOrder',
-      color,
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'chooseWarOrder', color, playerIndex: state.currentPlayer })
   }, [state.currentPlayer, dispatch])
-
   const handleWithdrawLeader = useCallback((color: LeaderColor) => {
-    dispatch({
-      type: 'withdrawLeader',
-      color,
-      playerIndex: state.currentPlayer,
-    })
+    dispatch({ type: 'withdrawLeader', color, playerIndex: state.currentPlayer })
   }, [state.currentPlayer, dispatch])
 
-  if (!gameStarted) {
-    return <SetupScreen onStartGame={(count, flags, kind) => {
-      setAiKind(kind)
-      startNewGame(count, flags)
-      setGameStarted(true)
-    }} />
+  const startGameWithPolicies = useCallback((sps: SeatPolicy[]) => {
+    setSeatPolicies(sps)
+    const aiFlags = sps.map(p => p.kind !== 'human')
+    startNewGame(sps.length, aiFlags)
+    setView('game')
+  }, [startNewGame])
+
+  if (view === 'setup') {
+    return <SetupScreen
+      onStartGame={startGameWithPolicies}
+      onOpenLab={() => setView('lab')}
+      initialSeatPolicies={seatPolicies}
+    />
+  }
+
+  if (view === 'lab') {
+    return <LabScreen
+      onStartMatch={startGameWithPolicies}
+      onBack={() => setView('setup')}
+    />
   }
 
   return (
@@ -243,7 +197,6 @@ function App() {
         disabled={!isActionPhase || isAITurn}
       />
 
-      {/* Dialog overlays */}
       {state.turnPhase === 'conflictSupport' && state.pendingConflict && (
         <ConflictDialog
           state={state}
@@ -270,7 +223,7 @@ function App() {
       {state.turnPhase === 'gameOver' && (
         <GameOverScreen
           state={state}
-          onPlayAgain={() => setGameStarted(false)}
+          onPlayAgain={() => setView('setup')}
         />
       )}
 

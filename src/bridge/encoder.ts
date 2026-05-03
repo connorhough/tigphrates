@@ -27,11 +27,52 @@ export const BOARD_CHANNELS = 15
 export const ACTION_SPACE_SIZE =
   8 * BOARD_ROWS * BOARD_COLS + 4 + BOARD_ROWS * BOARD_COLS + 64 + 1 + 64 + 4 + 6 + 1
 
+// Hierarchical action layout. The flat ACTION_SPACE_SIZE is partitioned into
+// 10 contiguous parameter ranges, one per action type. The hierarchical
+// policy samples a type first (Cat over 10 logits) then a parameter
+// conditional on the type (Cat over per-type slot range). Per-state mask
+// sums collapse from up to 1728 to 10 (types) + at most 704 (params),
+// usually <50 in either head — entropy regularizer no longer pushes mass
+// into invalid types.
+export const ACTION_TYPES = [
+  'placeTile', 'placeLeader', 'withdrawLeader', 'placeCatastrophe',
+  'swapTiles', 'pass', 'commitSupport', 'chooseWarOrder',
+  'buildMonument', 'declineMonument',
+] as const
+export const NUM_ACTION_TYPES = ACTION_TYPES.length // 10
+export const TYPE_PARAM_SIZES: number[] = [
+  4 * BOARD_ROWS * BOARD_COLS, // placeTile (4 colors × cells)
+  4 * BOARD_ROWS * BOARD_COLS, // placeLeader (4 colors × cells)
+  4,                            // withdrawLeader (color)
+  BOARD_ROWS * BOARD_COLS,      // placeCatastrophe (cell)
+  64,                           // swapTiles (6-bit hand mask)
+  1,                            // pass
+  64,                           // commitSupport (6-bit hand mask)
+  4,                            // chooseWarOrder (color)
+  6,                            // buildMonument (monument index)
+  1,                            // declineMonument
+]
+export const TYPE_BASES: number[] = (() => {
+  const out: number[] = []
+  let acc = 0
+  for (const s of TYPE_PARAM_SIZES) { out.push(acc); acc += s }
+  return out
+})()
+
+export function decodeFlatAction(index: number): { typeIdx: number; paramIdx: number } {
+  for (let t = NUM_ACTION_TYPES - 1; t >= 0; t--) {
+    if (index >= TYPE_BASES[t]) return { typeIdx: t, paramIdx: index - TYPE_BASES[t] }
+  }
+  return { typeIdx: 0, paramIdx: index }
+}
+
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 const LEADER_COLORS: LeaderColor[] = ['red', 'blue', 'green', 'black']
 
 export interface EncodedAction {
   index: number
+  typeIdx: number
+  paramIdx: number
   action: GameAction
   label: string
 }
@@ -178,6 +219,11 @@ export function activePlayerIndex(state: GameState): number {
   return state.currentPlayer
 }
 
+function makeAction(index: number, action: GameAction, label: string): EncodedAction {
+  const { typeIdx, paramIdx } = decodeFlatAction(index)
+  return { index, typeIdx, paramIdx, action, label }
+}
+
 export function enumerateValidActions(state: GameState): EncodedAction[] {
   const actions: EncodedAction[] = []
   const playerIndex = activePlayerIndex(state)
@@ -190,11 +236,11 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       const placements = getValidTilePlacements(state, color)
       for (const pos of placements) {
         const idx = ci * BOARD_ROWS * BOARD_COLS + pos.row * BOARD_COLS + pos.col
-        actions.push({
-          index: idx,
-          action: { type: 'placeTile', color, position: pos },
-          label: `placeTile:${color}@${pos.row},${pos.col}`,
-        })
+        actions.push(makeAction(
+          idx,
+          { type: 'placeTile', color, position: pos },
+          `placeTile:${color}@${pos.row},${pos.col}`,
+        ))
       }
     }
 
@@ -206,11 +252,11 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       const placements = getValidLeaderPlacements(state, color)
       for (const pos of placements) {
         const idx = BASE_LEADER + ci * BOARD_ROWS * BOARD_COLS + pos.row * BOARD_COLS + pos.col
-        actions.push({
-          index: idx,
-          action: { type: 'placeLeader', color, position: pos },
-          label: `placeLeader:${color}@${pos.row},${pos.col}`,
-        })
+        actions.push(makeAction(
+          idx,
+          { type: 'placeLeader', color, position: pos },
+          `placeLeader:${color}@${pos.row},${pos.col}`,
+        ))
       }
     }
 
@@ -219,11 +265,11 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       const color = LEADER_COLORS[ci]
       const leader = player.leaders.find(l => l.color === color)
       if (leader?.position) {
-        actions.push({
-          index: BASE_WITHDRAW + ci,
-          action: { type: 'withdrawLeader', color },
-          label: `withdraw:${color}`,
-        })
+        actions.push(makeAction(
+          BASE_WITHDRAW + ci,
+          { type: 'withdrawLeader', color },
+          `withdraw:${color}`,
+        ))
       }
     }
 
@@ -232,11 +278,11 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       for (let r = 0; r < BOARD_ROWS; r++) {
         for (let c = 0; c < BOARD_COLS; c++) {
           if (canPlaceCatastrophe(state, { row: r, col: c })) {
-            actions.push({
-              index: BASE_CATASTROPHE + r * BOARD_COLS + c,
-              action: { type: 'placeCatastrophe', position: { row: r, col: c } },
-              label: `catastrophe@${r},${c}`,
-            })
+            actions.push(makeAction(
+              BASE_CATASTROPHE + r * BOARD_COLS + c,
+              { type: 'placeCatastrophe', position: { row: r, col: c } },
+              `catastrophe@${r},${c}`,
+            ))
           }
         }
       }
@@ -250,20 +296,16 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
         for (let b = 0; b < player.hand.length; b++) {
           if (mask & (1 << b)) indices.push(b)
         }
-        actions.push({
-          index: BASE_SWAP + mask,
-          action: { type: 'swapTiles', indices },
-          label: `swap(${indices.length})`,
-        })
+        actions.push(makeAction(
+          BASE_SWAP + mask,
+          { type: 'swapTiles', indices },
+          `swap(${indices.length})`,
+        ))
       }
     }
 
     const BASE_PASS = BASE_SWAP + 64
-    actions.push({
-      index: BASE_PASS,
-      action: { type: 'pass' },
-      label: 'pass',
-    })
+    actions.push(makeAction(BASE_PASS, { type: 'pass' }, 'pass'))
   } else if (state.turnPhase === 'conflictSupport') {
     const BASE_SUPPORT = 8 * BOARD_ROWS * BOARD_COLS + 4 + BOARD_ROWS * BOARD_COLS + 64 + 1
     const conflict = state.pendingConflict!
@@ -278,22 +320,22 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       for (let b = 0; b < matchingHandIndices.length; b++) {
         if (mask & (1 << b)) indices.push(matchingHandIndices[b])
       }
-      actions.push({
-        index: BASE_SUPPORT + mask,
-        action: { type: 'commitSupport', indices },
-        label: `commitSupport(${indices.length})`,
-      })
+      actions.push(makeAction(
+        BASE_SUPPORT + mask,
+        { type: 'commitSupport', indices },
+        `commitSupport(${indices.length})`,
+      ))
     }
   } else if (state.turnPhase === 'warOrderChoice') {
     const BASE_WAR_ORDER = 8 * BOARD_ROWS * BOARD_COLS + 4 + BOARD_ROWS * BOARD_COLS + 64 + 1 + 64
     const pending = state.pendingConflict?.pendingWarColors ?? []
     for (const color of pending) {
       const ci = COLOR_INDEX[color]
-      actions.push({
-        index: BASE_WAR_ORDER + ci,
-        action: { type: 'chooseWarOrder', color },
-        label: `warOrder:${color}`,
-      })
+      actions.push(makeAction(
+        BASE_WAR_ORDER + ci,
+        { type: 'chooseWarOrder', color },
+        `warOrder:${color}`,
+      ))
     }
   } else if (state.turnPhase === 'monumentChoice') {
     const BASE_MONUMENT = 8 * BOARD_ROWS * BOARD_COLS + 4 + BOARD_ROWS * BOARD_COLS + 64 + 1 + 64 + 4
@@ -304,18 +346,18 @@ export function enumerateValidActions(state: GameState): EncodedAction[] {
       )
       for (let i = 0; i < monuments.length; i++) {
         const mIdx = state.monuments.indexOf(monuments[i])
-        actions.push({
-          index: BASE_MONUMENT + mIdx,
-          action: { type: 'buildMonument', monumentId: monuments[i].id },
-          label: `buildMonument:${monuments[i].id}`,
-        })
+        actions.push(makeAction(
+          BASE_MONUMENT + mIdx,
+          { type: 'buildMonument', monumentId: monuments[i].id },
+          `buildMonument:${monuments[i].id}`,
+        ))
       }
     }
-    actions.push({
-      index: BASE_MONUMENT + 6,
-      action: { type: 'declineMonument' },
-      label: 'declineMonument',
-    })
+    actions.push(makeAction(
+      BASE_MONUMENT + 6,
+      { type: 'declineMonument' },
+      'declineMonument',
+    ))
   }
 
   return actions

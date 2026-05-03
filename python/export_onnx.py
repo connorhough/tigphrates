@@ -18,9 +18,16 @@ Output input names (in order):
     opp_leaders (8,)                       float32
     mask        (ACTION_SPACE_SIZE,)       bool — if any False, those logits get -inf
 
-Output:
-    logits      (ACTION_SPACE_SIZE,)       float32  (already masked)
-    value       scalar                     float32
+Outputs (Phase 11.1 hierarchical heads):
+    type_logits  (NUM_ACTION_TYPES,)        float32   (raw, no type-level mask)
+    param_logits (ACTION_SPACE_SIZE,)       float32   (per-action mask applied in-graph)
+    value        scalar                     float32
+
+The browser-side adapter (src/ai/onnxPolicy.ts) does hierarchical argmax:
+pick the best valid type (using the per-state EncodedAction list to know
+which types are valid) then the best parameter inside that type's slot
+range. Type masking is left to JS so we don't have to bake a per-type
+gather/OR into the ONNX graph.
 
 Usage:
     python python/export_onnx.py [--model models/policy_best.pt] [--out models/policy.onnx]
@@ -37,7 +44,7 @@ import torch
 import torch.nn as nn
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from train import PolicyValueNetwork
+from train import PolicyValueNetwork, _adapt_state_dict
 from tigphrates_env import ACTION_SPACE_SIZE, BOARD_CHANNELS, BOARD_ROWS, BOARD_COLS
 
 
@@ -69,12 +76,14 @@ class FlatPolicy(nn.Module):
             "scores": scores, "meta": meta, "conflict": conflict,
             "leaders": leaders, "opp_scores": opp_scores, "opp_leaders": opp_leaders,
         }
-        logits, value = self.base.forward(obs)
-        # Apply mask in-graph so the consuming runtime gets pre-masked logits.
+        type_logits, param_logits, value = self.base.forward(obs)
+        # Apply the per-action mask to param_logits in-graph. type_logits is
+        # left raw — the browser builds the per-state valid-type set from the
+        # enumerated EncodedAction list (cheaper than gathering inside ONNX).
         # Use a finite penalty rather than -inf so the export is portable
         # across runtimes that may not handle -inf in softmax cleanly.
-        logits = logits.masked_fill(~mask.bool(), -1e9)
-        return logits, value
+        param_logits = param_logits.masked_fill(~mask.bool(), -1e9)
+        return type_logits, param_logits, value
 
 
 def main():
@@ -89,7 +98,8 @@ def main():
         sys.exit(2)
 
     base = PolicyValueNetwork()
-    base.load_state_dict(torch.load(args.model, map_location="cpu"))
+    raw = torch.load(args.model, map_location="cpu")
+    base.load_state_dict(_adapt_state_dict(raw), strict=False)
     base.train(False)
     flat = FlatPolicy(base)
     flat.train(False)
@@ -119,13 +129,14 @@ def main():
             "board", "hand", "hand_seq", "scores", "meta",
             "conflict", "leaders", "opp_scores", "opp_leaders", "mask",
         ],
-        output_names=["logits", "value"],
+        output_names=["type_logits", "param_logits", "value"],
         dynamic_axes={
             "board": {0: "batch"}, "hand": {0: "batch"}, "hand_seq": {0: "batch"},
             "scores": {0: "batch"}, "meta": {0: "batch"}, "conflict": {0: "batch"},
             "leaders": {0: "batch"}, "opp_scores": {0: "batch"},
             "opp_leaders": {0: "batch"}, "mask": {0: "batch"},
-            "logits": {0: "batch"}, "value": {0: "batch"},
+            "type_logits": {0: "batch"}, "param_logits": {0: "batch"},
+            "value": {0: "batch"},
         },
     )
     try:

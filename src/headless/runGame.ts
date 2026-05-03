@@ -2,6 +2,33 @@ import { GameState, GameAction, TileColor, TurnPhase } from '../engine/types'
 import { createGame } from '../engine/setup'
 import { gameReducer } from '../engine/reducer'
 import { getAIAction } from '../ai/simpleAI'
+import { getHeadlessOnnxAction } from './onnxAdapter'
+
+export type AiKind = 'simple' | 'onnx'
+export type GetActionFn = (state: GameState, playerIndex: number) => GameAction | Promise<GameAction>
+
+function makeGetAction(kinds: AiKind[], onnxModelPath: string): GetActionFn {
+  return async (state, playerIndex) => {
+    const kind = kinds[playerIndex] ?? 'simple'
+    if (kind === 'onnx') {
+      try {
+        return await getHeadlessOnnxAction(state, onnxModelPath)
+      } catch (e) {
+        // ONNX inference failed (model missing, shape mismatch, etc.) —
+        // fall back to heuristic so the tournament can still complete.
+        // Logged once so we know it happened.
+        if (!_warnedOnnxFallback) {
+          console.warn(`[onnx] inference failed, falling back to simpleAI:`, e)
+          _warnedOnnxFallback = true
+        }
+        return getAIAction(state)
+      }
+    }
+    return getAIAction(state)
+  }
+}
+
+let _warnedOnnxFallback = false
 
 // --- Compact log notation ---
 // Colors: R=red B=blue G=green K=black
@@ -93,9 +120,14 @@ export interface RunOptions {
   maxActions?: number
   maxTurns?: number
   log?: boolean
+  /** Per-player AI kinds. Length must match playerCount. Defaults to all 'simple'. */
+  aiKinds?: AiKind[]
+  /** Path to ONNX model (used when any aiKind is 'onnx'). */
+  onnxModelPath?: string
 }
 
 const DEFAULT_MAX_ACTIONS = 5000
+const DEFAULT_ONNX_MODEL = 'models/policy.onnx'
 
 /**
  * Determine which player's turn it is for the current game phase.
@@ -111,9 +143,11 @@ function activePlayer(state: GameState): number {
 }
 
 /**
- * Run a single game with all AI players to completion.
+ * Run a single game with all AI players to completion. Async because the
+ * ONNX path uses session.run() which returns a Promise; the heuristic path
+ * is sync but the function is uniformly async to keep one code path.
  */
-export function runGame(playerCountOrOpts: number | RunOptions, maxActions?: number): GameResult {
+export async function runGame(playerCountOrOpts: number | RunOptions, maxActions?: number): Promise<GameResult> {
   const opts: RunOptions = typeof playerCountOrOpts === 'number'
     ? { playerCount: playerCountOrOpts, maxActions, log: true }
     : playerCountOrOpts
@@ -121,6 +155,11 @@ export function runGame(playerCountOrOpts: number | RunOptions, maxActions?: num
   const actionLimit = opts.maxActions ?? DEFAULT_MAX_ACTIONS
   const turnLimit = opts.maxTurns ?? Infinity
   const logging = opts.log !== false
+  const aiKinds: AiKind[] = opts.aiKinds && opts.aiKinds.length === playerCount
+    ? opts.aiKinds
+    : new Array(playerCount).fill('simple')
+  const onnxModelPath = opts.onnxModelPath ?? DEFAULT_ONNX_MODEL
+  const getAction = makeGetAction(aiKinds, onnxModelPath)
 
   const aiFlags = new Array(playerCount).fill(true)
   let state = createGame(playerCount, aiFlags)
@@ -158,7 +197,7 @@ export function runGame(playerCountOrOpts: number | RunOptions, maxActions?: num
     }
 
     const playerIndex = activePlayer(state)
-    const action: GameAction = getAIAction(state)
+    const action: GameAction = await getAction(state, playerIndex)
     const prevState = state
     let fallback = false
 
@@ -272,17 +311,22 @@ function totalScore(score: Record<string, number>): number {
 /**
  * Run multiple games and return aggregate results.
  */
-export function runTournament(
+export async function runTournament(
   gameCount: number,
   playerCount: number,
   maxActions = DEFAULT_MAX_ACTIONS,
-): { results: GameResult[]; wins: number[]; avgMinScores: number[] } {
+  extra: { aiKinds?: AiKind[]; onnxModelPath?: string } = {},
+): Promise<{ results: GameResult[]; wins: number[]; avgMinScores: number[] }> {
   const results: GameResult[] = []
   const wins = new Array(playerCount).fill(0)
   const totalMinScores = new Array(playerCount).fill(0)
 
   for (let i = 0; i < gameCount; i++) {
-    const result = runGame({ playerCount, maxActions, log: false })
+    const result = await runGame({
+      playerCount, maxActions, log: false,
+      aiKinds: extra.aiKinds,
+      onnxModelPath: extra.onnxModelPath,
+    })
     results.push(result)
     wins[result.winner]++
     for (let p = 0; p < playerCount; p++) {

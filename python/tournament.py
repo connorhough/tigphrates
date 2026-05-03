@@ -28,7 +28,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tigphrates_env import TigphratesEnv
-from train import PolicyValueNetwork, make_policy_fn
+from train import PolicyValueNetwork, make_policy_fn, _adapt_state_dict
 from evaluate import (
     ELO_FILE,
     ELO_AGENT_KEY,
@@ -44,7 +44,8 @@ HEURISTIC_KEY = "_heuristic"
 
 def _load_model(path: pathlib.Path) -> torch.nn.Module:
     m = PolicyValueNetwork()
-    m.load_state_dict(torch.load(path, map_location="cpu"))
+    raw = torch.load(path, map_location="cpu")
+    m.load_state_dict(_adapt_state_dict(raw), strict=False)
     m.train(False)
     from train import DEVICE
     m.to(DEVICE)

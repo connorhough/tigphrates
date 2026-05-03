@@ -12,6 +12,7 @@ import copy
 import glob
 import random
 import pathlib
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
@@ -59,6 +60,16 @@ MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 1.0))
 # BC auxiliary (Phase 6.3)
 BC_COEF = float(os.environ.get("BC_COEF", 0.1))
 BC_QUERY_PROB = float(os.environ.get("BC_QUERY_PROB", 0.25))
+
+# V-trace replay buffer (Phase 11.2). On-policy PPO discards each rollout
+# after a single update; mixing in past rollouts with a truncated importance-
+# sampling correction extracts more learning per Mac mini step. Replay rows
+# get rho = min(c_bar, pi_new(a|s) / pi_old(a|s)) before PPO clipping; current
+# rollout rows keep the standard PPO ratio. Value targets for replay rows are
+# slightly stale (we do not recompute GAE under the current value head); at
+# REPLAY_K=2 the bias is small and PPO's clip keeps gradients bounded.
+REPLAY_K = int(os.environ.get("REPLAY_K", 2))
+REPLAY_RHO_BAR = float(os.environ.get("REPLAY_RHO_BAR", 1.0))
 
 # Architecture (env-var overridable so a sweep can scale capacity)
 BOARD_CONV_CHANNELS = int(os.environ.get("BOARD_CONV_CHANNELS", 32))
@@ -109,6 +120,145 @@ LEAGUE_SCHEDULER = "per_episode"
 NUM_ENVS = 4              # parallel Tigphrates envs (one Node subprocess each)
 
 # ---------------------------------------------------------------------------
+# Hierarchical action layout (must match src/bridge/encoder.ts)
+# ---------------------------------------------------------------------------
+# Two-stage policy: type_head picks one of NUM_ACTION_TYPES action types,
+# then param_head conditional on type picks within that type's slot range.
+# Per-state mask sums collapse from up to 1728 down to ~10 types and
+# typically <50 params per type, so the entropy regularizer no longer
+# pushes mass into invalid regions.
+
+NUM_ACTION_TYPES = 10
+TYPE_PARAM_SIZES = [
+    4 * BOARD_ROWS * BOARD_COLS,  # placeTile
+    4 * BOARD_ROWS * BOARD_COLS,  # placeLeader
+    4,                             # withdrawLeader
+    BOARD_ROWS * BOARD_COLS,       # placeCatastrophe
+    64,                            # swapTiles
+    1,                             # pass
+    64,                            # commitSupport
+    4,                             # chooseWarOrder
+    6,                             # buildMonument
+    1,                             # declineMonument
+]
+TYPE_BASES = []
+_acc = 0
+for _s in TYPE_PARAM_SIZES:
+    TYPE_BASES.append(_acc)
+    _acc += _s
+assert _acc == ACTION_SPACE_SIZE, (
+    f"hierarchical layout total {_acc} != ACTION_SPACE_SIZE {ACTION_SPACE_SIZE}"
+)
+MAX_PARAMS = max(TYPE_PARAM_SIZES)
+
+# Precomputed gather/decoding tensors. Built on CPU at import; moved per-call
+# onto the same device as the logits so this works under MPS / CUDA / CPU.
+_GATHER_IDX_NP = np.zeros((NUM_ACTION_TYPES, MAX_PARAMS), dtype=np.int64)
+_PAD_MASK_NP = np.zeros((NUM_ACTION_TYPES, MAX_PARAMS), dtype=bool)
+_FLAT_TO_TYPE_NP = np.zeros(ACTION_SPACE_SIZE, dtype=np.int64)
+_FLAT_TO_PARAM_NP = np.zeros(ACTION_SPACE_SIZE, dtype=np.int64)
+for _t in range(NUM_ACTION_TYPES):
+    _base = TYPE_BASES[_t]
+    _size = TYPE_PARAM_SIZES[_t]
+    for _p in range(_size):
+        _GATHER_IDX_NP[_t, _p] = _base + _p
+        _PAD_MASK_NP[_t, _p] = True
+        _FLAT_TO_TYPE_NP[_base + _p] = _t
+        _FLAT_TO_PARAM_NP[_base + _p] = _p
+
+GATHER_IDX = torch.tensor(_GATHER_IDX_NP, dtype=torch.long, device=DEVICE)
+PAD_MASK = torch.tensor(_PAD_MASK_NP, dtype=torch.bool, device=DEVICE)
+TYPE_BASES_T = torch.tensor(TYPE_BASES, dtype=torch.long, device=DEVICE)
+FLAT_TO_TYPE = torch.tensor(_FLAT_TO_TYPE_NP, dtype=torch.long, device=DEVICE)
+FLAT_TO_PARAM = torch.tensor(_FLAT_TO_PARAM_NP, dtype=torch.long, device=DEVICE)
+
+
+# ---------------------------------------------------------------------------
+# Symmetry augmentation (Phase 11.4)
+# ---------------------------------------------------------------------------
+# T&E's canonical river layout is NOT exactly column-symmetric, so the
+# mirror is a virtual "mirror-world" T&E board with a different river
+# pattern. The policy sees the river as one of its input channels, so
+# training on the mirrored sample teaches it to play on either layout —
+# useful regularization, not a true game-equivariance. log_prob, value,
+# reward, advantage, and return are reused as-if on-policy; PPO clipping
+# bounds the policy-mismatch bias.
+#
+# Implementation: build a fixed permutation MIRROR_PERM of the flat action
+# space, where slot i maps to the reflected-cell action of the same type
+# (non-spatial types are identity). Mask augmentation is `mask[MIRROR_PERM]`,
+# board augmentation is `board[:, :, ::-1]`.
+def _compute_mirror_index(idx: int) -> int:
+    type_idx = int(_FLAT_TO_TYPE_NP[idx])
+    param_idx = int(_FLAT_TO_PARAM_NP[idx])
+    base = TYPE_BASES[type_idx]
+    if type_idx in (0, 1):
+        # placeTile / placeLeader: param = ci * (R*C) + r * C + c
+        ci, rest = divmod(param_idx, BOARD_ROWS * BOARD_COLS)
+        r, c = divmod(rest, BOARD_COLS)
+        c_mirror = BOARD_COLS - 1 - c
+        return base + ci * BOARD_ROWS * BOARD_COLS + r * BOARD_COLS + c_mirror
+    if type_idx == 3:
+        # placeCatastrophe: param = r * C + c
+        r, c = divmod(param_idx, BOARD_COLS)
+        return base + r * BOARD_COLS + (BOARD_COLS - 1 - c)
+    # withdrawLeader, swapTiles, pass, commitSupport, chooseWarOrder,
+    # buildMonument, declineMonument: not spatial, identity.
+    return idx
+
+
+_MIRROR_PERM_NP = np.array(
+    [_compute_mirror_index(i) for i in range(ACTION_SPACE_SIZE)], dtype=np.int64
+)
+# Mirror is involutive — verify once at import to catch any indexing bugs.
+assert (_MIRROR_PERM_NP[_MIRROR_PERM_NP] == np.arange(ACTION_SPACE_SIZE)).all(), (
+    "MIRROR_PERM is not involutive; spatial action mirror has an off-by-one"
+)
+
+SYMMETRY_AUG = os.environ.get("SYMMETRY_AUG", "1") == "1"
+
+
+def _mirror_obs_action(obs: dict, action: int, mask: np.ndarray) -> tuple[dict, int, np.ndarray]:
+    """Reflect a transition along the column axis. Returns (mirrored_obs,
+    mirrored_action_idx, mirrored_mask). Non-spatial obs fields and action
+    types pass through unchanged."""
+    new_obs = dict(obs)
+    new_obs["board"] = obs["board"][:, :, ::-1].copy()
+
+    # leaders / opp_leaders: 4 (leader, position) pairs as flat 8-vector
+    # [r0,c0,r1,c1,r2,c2,r3,c3]; col fields at odd indices. -1 indicates
+    # "off-board" (leader not placed) — preserve.
+    leaders = obs["leaders"].copy()
+    cols = leaders[1::2]
+    leaders[1::2] = np.where(cols >= 0, BOARD_COLS - 1 - cols, cols)
+    new_obs["leaders"] = leaders
+
+    opp_leaders = obs["opp_leaders"].copy()
+    cols = opp_leaders[1::2]
+    opp_leaders[1::2] = np.where(cols >= 0, BOARD_COLS - 1 - cols, cols)
+    new_obs["opp_leaders"] = opp_leaders
+
+    new_action = int(_MIRROR_PERM_NP[action])
+    new_mask = mask[_MIRROR_PERM_NP]
+    return new_obs, new_action, new_mask
+
+
+def _adapt_state_dict(state_dict: dict) -> dict:
+    """Translate a pre-Phase-11.1 state dict (flat `policy_head`) into the
+    hierarchical layout. The old policy_head's row weights map directly to
+    the new param_head (same output dim = ACTION_SPACE_SIZE). type_head
+    keeps its random init so the policy starts confused over types but
+    inherits the parameter-level structure."""
+    if "policy_head.weight" in state_dict and "param_head.weight" not in state_dict:
+        adapted = dict(state_dict)
+        adapted["param_head.weight"] = adapted.pop("policy_head.weight")
+        if "policy_head.bias" in adapted:
+            adapted["param_head.bias"] = adapted.pop("policy_head.bias")
+        return adapted
+    return state_dict
+
+
+# ---------------------------------------------------------------------------
 # Policy Network
 # ---------------------------------------------------------------------------
 
@@ -151,8 +301,15 @@ class PolicyValueNetwork(nn.Module):
             in_dim = HIDDEN_DIM
         self.trunk = nn.Sequential(*layers)
 
-        # Policy head
-        self.policy_head = nn.Linear(HIDDEN_DIM, ACTION_SPACE_SIZE)
+        # Hierarchical policy heads.
+        # type_head:  HIDDEN_DIM -> NUM_ACTION_TYPES (10).
+        # param_head: HIDDEN_DIM -> ACTION_SPACE_SIZE (1728).
+        # The param head's output is partitioned by type slot range; given a
+        # sampled type t, only the slice [TYPE_BASES[t]:TYPE_BASES[t]+sizes[t]]
+        # is consulted. Same total parameter count as the previous flat head;
+        # the win comes from masked-down per-head distributions.
+        self.type_head = nn.Linear(HIDDEN_DIM, NUM_ACTION_TYPES)
+        self.param_head = nn.Linear(HIDDEN_DIM, ACTION_SPACE_SIZE)
 
         # Value head
         self.value_head = nn.Linear(HIDDEN_DIM, 1)
@@ -166,8 +323,9 @@ class PolicyValueNetwork(nn.Module):
                 nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-        # Small init for policy and value output
-        nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
+        # Small init for both policy heads and the value output.
+        nn.init.orthogonal_(self.type_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.param_head.weight, gain=0.01)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
 
     def forward(self, obs):
@@ -192,24 +350,78 @@ class PolicyValueNetwork(nn.Module):
         combined = torch.cat([board_features, extra], dim=-1)
 
         trunk_out = self.trunk(combined)
-        logits = self.policy_head(trunk_out)
+        type_logits = self.type_head(trunk_out)
+        param_logits = self.param_head(trunk_out)
         value = self.value_head(trunk_out).squeeze(-1)
-        return logits, value
+        return type_logits, param_logits, value
+
+    def hierarchical_dists(self, type_logits, param_logits, flat_mask):
+        """Build masked type distribution and the (B, NT, MP) padded
+        param-logits tensor. flat_mask: (B, ACTION_SPACE_SIZE) bool/int.
+        Returns (type_dist, param_logits_padded, type_mask).
+
+        param_logits_padded is already masked: invalid (per-action-mask AND
+        out-of-range pad) slots set to -inf, so callers can build a
+        Categorical for any chosen type by indexing the row directly.
+
+        type_mask is (B, NT) — true wherever ANY param within that type is
+        legal in the current state. type_logits get -inf'd outside type_mask.
+        """
+        gather_idx = GATHER_IDX.to(type_logits.device)
+        pad_mask = PAD_MASK.to(type_logits.device)
+
+        flat_mask = torch.as_tensor(flat_mask, dtype=torch.bool, device=type_logits.device)
+        if flat_mask.dim() == 1:
+            flat_mask = flat_mask.unsqueeze(0)
+
+        # (B, NT, MP) view of param logits, plus the matching mask view.
+        param_logits_padded = param_logits[:, gather_idx]
+        flat_mask_padded = flat_mask[:, gather_idx]
+        valid = flat_mask_padded & pad_mask.unsqueeze(0)
+
+        param_logits_padded = param_logits_padded.masked_fill(~valid, float("-inf"))
+        type_mask = valid.any(dim=-1)
+        type_logits_masked = type_logits.masked_fill(~type_mask, float("-inf"))
+        type_dist = Categorical(logits=type_logits_masked)
+        return type_dist, param_logits_padded, type_mask
 
     def get_action_and_value(self, obs, action_mask, action=None):
-        logits, value = self.forward(obs)
+        type_logits, param_logits, value = self.forward(obs)
+        type_dist, param_logits_padded, _type_mask = self.hierarchical_dists(
+            type_logits, param_logits, action_mask
+        )
+        B = type_logits.shape[0]
+        device = type_logits.device
 
-        # Mask invalid actions. Place mask on the same device as logits so
-        # the masked_fill stays on GPU when DEVICE is mps/cuda.
-        mask_tensor = torch.tensor(action_mask, dtype=torch.bool, device=logits.device)
-        logits = logits.masked_fill(~mask_tensor, float("-inf"))
-
-        dist = Categorical(logits=logits)
         if action is None:
-            action = dist.sample()
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
-        return action, log_prob, entropy, value
+            type_action = type_dist.sample()  # (B,)
+            chosen_param_logits = param_logits_padded[torch.arange(B, device=device), type_action]
+            param_dist = Categorical(logits=chosen_param_logits)
+            param_action = param_dist.sample()
+            base = TYPE_BASES_T.to(device)[type_action]
+            action_t = base + param_action
+        else:
+            action_t = action if isinstance(action, torch.Tensor) else torch.tensor(
+                action, dtype=torch.long, device=device
+            )
+            if action_t.dim() == 0:
+                action_t = action_t.unsqueeze(0)
+            flat_to_type = FLAT_TO_TYPE.to(device)
+            flat_to_param = FLAT_TO_PARAM.to(device)
+            type_action = flat_to_type[action_t]
+            param_action = flat_to_param[action_t]
+            chosen_param_logits = param_logits_padded[torch.arange(B, device=device), type_action]
+            param_dist = Categorical(logits=chosen_param_logits)
+
+        # Joint log-prob via chain rule. Joint entropy approximated as
+        # H(type) + H(param | sampled-type) — exact for the sampled action,
+        # a Monte-Carlo estimate of E_t[H(param|t)] for the regularizer.
+        type_log_prob = type_dist.log_prob(type_action)
+        param_log_prob = param_dist.log_prob(param_action)
+        log_prob = type_log_prob + param_log_prob
+        entropy = type_dist.entropy() + param_dist.entropy()
+
+        return action_t, log_prob, entropy, value
 
 # ---------------------------------------------------------------------------
 # Observation batching utilities
@@ -360,12 +572,9 @@ def collect_rollout_vec(
         batched_obs = stack_obs(obs_per_env)
         batched_masks = np.stack(masks, axis=0)
         with torch.no_grad():
-            logits, values_t = model.forward(batched_obs)
-            mask_t = torch.tensor(batched_masks, dtype=torch.bool, device=logits.device)
-            logits = logits.masked_fill(~mask_t, float("-inf"))
-            dist = Categorical(logits=logits)
-            sampled = dist.sample()
-            log_probs_t = dist.log_prob(sampled)
+            sampled, log_probs_t, _entropy_t, values_t = model.get_action_and_value(
+                batched_obs, batched_masks
+            )
 
         # Snapshot pre-step shaping inputs per env.
         prev_metrics = []
@@ -466,6 +675,29 @@ def collect_rollout_vec(
         all_adv.extend(adv.tolist())
         all_ret.extend(ret.tolist())
         all_expert.extend(per_env_expert[i])
+
+    # Symmetry augmentation: append a mirrored copy of every transition.
+    # Doubles the PPO batch size for free at the engine layer (no extra
+    # rollouts), at the cost of ~2× compute per update step. The mirrored
+    # transition reuses the original log_prob/value/return/advantage as-if
+    # on-policy; PPO clipping bounds the policy-mismatch bias.
+    if SYMMETRY_AUG and all_obs:
+        n_orig = len(all_obs)
+        for i in range(n_orig):
+            m_obs, m_action, m_mask = _mirror_obs_action(
+                all_obs[i], int(all_actions[i]), all_masks[i]
+            )
+            all_obs.append(m_obs)
+            all_actions.append(m_action)
+            all_log_probs.append(all_log_probs[i])
+            all_values.append(all_values[i])
+            all_masks.append(m_mask)
+            all_adv.append(all_adv[i])
+            all_ret.append(all_ret[i])
+            # Also mirror the BC expert target so the auxiliary loss stays
+            # supervised on the mirrored frame.
+            exp = all_expert[i]
+            all_expert.append(int(_MIRROR_PERM_NP[exp]) if exp >= 0 else -1)
 
     return {
         "obs": all_obs,
@@ -589,6 +821,53 @@ def collect_rollout(env, model, rollout_steps):
     }
 
 
+def combine_with_replay(current: dict, replay_buf) -> dict:
+    """Concatenate the current rollout with every rollout in the replay
+    buffer, tagging each row with `is_replay` (False for current, True for
+    replay). The combined dict feeds straight into ppo_update."""
+    if not replay_buf:
+        out = dict(current)
+        out["is_replay"] = np.zeros(len(current["obs"]), dtype=bool)
+        return out
+
+    obs = list(current["obs"])
+    actions = list(current["actions"])
+    log_probs = list(current["log_probs"])
+    advantages = list(current["advantages"])
+    returns = list(current["returns"])
+    masks = list(current["masks"])
+    values = list(current["values"])
+    expert = list(current["expert_actions"])
+    is_replay = [False] * len(current["obs"])
+
+    for r in replay_buf:
+        if not r["obs"]:
+            continue
+        obs.extend(r["obs"])
+        actions.extend(r["actions"])
+        log_probs.extend(r["log_probs"])
+        advantages.extend(r["advantages"])
+        returns.extend(r["returns"])
+        masks.extend(r["masks"])
+        values.extend(r["values"])
+        expert.extend(r["expert_actions"])
+        is_replay.extend([True] * len(r["obs"]))
+
+    return {
+        "obs": obs,
+        "actions": np.array(actions, dtype=np.int64),
+        "log_probs": np.array(log_probs, dtype=np.float32),
+        "advantages": np.array(advantages, dtype=np.float32),
+        "returns": np.array(returns, dtype=np.float32),
+        "masks": masks,
+        "values": np.array(values, dtype=np.float32),
+        "expert_actions": np.array(expert, dtype=np.int64),
+        "is_replay": np.array(is_replay, dtype=bool),
+        "episode_rewards": current.get("episode_rewards", []),
+        "steps": current.get("steps", 0),
+    }
+
+
 def ppo_update(model, optimizer, rollout):
     """Run PPO optimization epochs on collected rollout data."""
     n = len(rollout["obs"])
@@ -602,6 +881,10 @@ def ppo_update(model, optimizer, rollout):
     expert_actions = torch.tensor(
         rollout.get("expert_actions", np.full(n, -1, dtype=np.int64)),
         dtype=torch.long, device=DEVICE,
+    )
+    is_replay = torch.tensor(
+        rollout.get("is_replay", np.zeros(n, dtype=bool)),
+        dtype=torch.bool, device=DEVICE,
     )
 
     # Normalize advantages
@@ -626,6 +909,7 @@ def ppo_update(model, optimizer, rollout):
             mb_advantages = advantages[mb_idx]
             mb_returns = returns[mb_idx]
             mb_expert = expert_actions[mb_idx]
+            mb_replay = is_replay[mb_idx]
 
             # Build combined mask for this minibatch
             mb_masks = np.array([rollout["masks"][i] for i in mb_idx])
@@ -643,34 +927,72 @@ def ppo_update(model, optimizer, rollout):
                         f"(first bad row: action={taken[bad[0]]}, mask sum={mb_masks[bad[0]].sum()})"
                     )
 
-            logits, values = model.forward(mb_obs)
-            mask_tensor = torch.tensor(mb_masks, dtype=torch.bool, device=logits.device)
-            logits = logits.masked_fill(~mask_tensor, float("-inf"))
+            type_logits, param_logits, values = model.forward(mb_obs)
+            type_dist, param_logits_padded, _type_mask = model.hierarchical_dists(
+                type_logits, param_logits, mb_masks
+            )
+            B = type_logits.shape[0]
+            device = type_logits.device
 
-            dist = Categorical(logits=logits)
-            new_log_probs = dist.log_prob(mb_actions)
-            entropy = dist.entropy().mean()
+            # Decompose taken action into (type, param) so we can recompute
+            # log-prob under the current (post-update) hierarchical policy.
+            flat_to_type = FLAT_TO_TYPE.to(device)
+            flat_to_param = FLAT_TO_PARAM.to(device)
+            type_action = flat_to_type[mb_actions]
+            param_action = flat_to_param[mb_actions]
+            chosen_param_logits = param_logits_padded[torch.arange(B, device=device), type_action]
+            param_dist = Categorical(logits=chosen_param_logits)
 
-            # PPO clipped objective
+            new_log_probs = type_dist.log_prob(type_action) + param_dist.log_prob(param_action)
+            entropy = (type_dist.entropy() + param_dist.entropy()).mean()
+
+            # PPO clipped objective with V-trace truncated IS for replay rows.
+            # Current-rollout rows: standard ratio. Replay rows: ratio capped
+            # at REPLAY_RHO_BAR so stale data never up-weights the gradient.
+            # PPO's [1-eps, 1+eps] clip then runs over the (possibly capped)
+            # ratio for both populations, so off-policy data can't drift the
+            # update past the standard PPO trust region.
             ratio = (new_log_probs - mb_old_log_probs).exp()
-            surr1 = ratio * mb_advantages
-            surr2 = torch.clamp(ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advantages
+            effective_ratio = torch.where(
+                mb_replay,
+                torch.clamp(ratio, max=REPLAY_RHO_BAR),
+                ratio,
+            )
+            surr1 = effective_ratio * mb_advantages
+            surr2 = torch.clamp(effective_ratio, 1.0 - CLIP_EPS, 1.0 + CLIP_EPS) * mb_advantages
             pg_loss = -torch.min(surr1, surr2).mean()
 
             # Value loss
             vf_loss = F.mse_loss(values, mb_returns)
 
-            # Auxiliary BC loss: cross-entropy against the heuristic's chosen
-            # action on the subset of rows where it was queried (expert >= 0).
-            # Keeps the policy from drifting too far from heuristic-quality
-            # play during exploration; small weight so PPO still drives.
-            bc_mask = mb_expert >= 0
-            if bc_mask.any():
-                bc_logits = logits[bc_mask]
-                bc_targets = mb_expert[bc_mask]
-                bc_loss = F.cross_entropy(bc_logits, bc_targets)
+            # Auxiliary BC loss: hierarchical cross-entropy against the
+            # heuristic's chosen action on the subset of rows where it was
+            # queried (expert >= 0). Keeps the policy from drifting too far
+            # from heuristic-quality play during exploration. Decomposed
+            # into type CE + parameter CE so each head learns directly.
+            bc_idx = torch.where(mb_expert >= 0)[0]
+            if bc_idx.numel() > 0:
+                expert_flat = mb_expert[bc_idx]
+                expert_type = flat_to_type[expert_flat]
+                expert_param = flat_to_param[expert_flat]
+
+                # type_dist.logits is already log-softmax (normalized) so
+                # nll_loss is the correct masked CE; F.cross_entropy would
+                # double-normalize but log_softmax is idempotent so it's fine
+                # too — using nll_loss for clarity.
+                bc_type_log_probs = type_dist.logits[bc_idx]
+                type_ce = F.nll_loss(bc_type_log_probs, expert_type)
+
+                bc_param_padded = param_logits_padded[bc_idx]  # (n_bc, NT, MP)
+                bc_chosen_logits = bc_param_padded[
+                    torch.arange(bc_idx.numel(), device=device), expert_type
+                ]  # (n_bc, MP) — raw masked logits, run log_softmax now.
+                bc_param_log_probs = F.log_softmax(bc_chosen_logits, dim=-1)
+                param_ce = F.nll_loss(bc_param_log_probs, expert_param)
+
+                bc_loss = type_ce + param_ce
             else:
-                bc_loss = torch.tensor(0.0)
+                bc_loss = torch.tensor(0.0, device=device)
 
             # Total loss
             loss = (
@@ -745,7 +1067,8 @@ def add_to_pool(model: nn.Module, label: str | None = None) -> pathlib.Path:
 
 def load_policy_from_path(path: str) -> nn.Module:
     m = PolicyValueNetwork()
-    m.load_state_dict(torch.load(path, map_location="cpu"))
+    raw = torch.load(path, map_location="cpu")
+    m.load_state_dict(_adapt_state_dict(raw), strict=False)
     m.train(False)
     m.to(DEVICE)
     return m
@@ -803,8 +1126,15 @@ if __name__ == "__main__":
             # the file ourselves in this same script, so it is trusted.
             ckpt = torch.load(resume_path, map_location="cpu", weights_only=False)
             if isinstance(ckpt, dict) and "model_state" in ckpt:
-                model.load_state_dict(ckpt["model_state"])
-                optimizer.load_state_dict(ckpt["optimizer_state"])
+                model.load_state_dict(_adapt_state_dict(ckpt["model_state"]), strict=False)
+                # Optimizer state can only be reused if the parameter shapes
+                # match — adapted (renamed) state dicts do, but if the source
+                # was pre-hierarchical the new type_head has no optimizer
+                # entries. load_state_dict will raise; catch and skip.
+                try:
+                    optimizer.load_state_dict(ckpt["optimizer_state"])
+                except (ValueError, KeyError) as e:
+                    print(f"  optimizer state incompatible ({e}); using fresh optimizer")
                 if "torch_rng" in ckpt:
                     torch.set_rng_state(ckpt["torch_rng"])
                 if "numpy_rng" in ckpt:
@@ -813,7 +1143,7 @@ if __name__ == "__main__":
                 print(f"Resumed from {resume_path}")
             else:
                 # Bare state_dict: load weights, fresh optimizer.
-                model.load_state_dict(ckpt)
+                model.load_state_dict(_adapt_state_dict(ckpt), strict=False)
                 resumed = True
                 print(f"Loaded weights from {resume_path} (fresh optimizer)")
         else:
@@ -823,7 +1153,8 @@ if __name__ == "__main__":
         bc_path = RUN_DIR / "policy_bc.pt"
         if bc_path.exists():
             try:
-                model.load_state_dict(torch.load(bc_path, map_location="cpu"))
+                raw = torch.load(bc_path, map_location="cpu")
+                model.load_state_dict(_adapt_state_dict(raw), strict=False)
                 print(f"Loaded BC warm start from {bc_path}")
             except Exception as e:
                 print(f"Failed to load BC warm start ({e}); starting from random init")
@@ -859,6 +1190,12 @@ if __name__ == "__main__":
     rollout_num = 0
     all_episode_rewards = []
     opponent_label = "heuristic"
+    # V-trace replay buffer. Holds the K most recent rollouts; each PPO
+    # update mixes the current rollout with the buffer so each transition is
+    # reused ~K times before being dropped. K=0 disables replay (pure on-
+    # policy PPO behavior). Stored rollouts use the original behavior-policy
+    # log_probs as the IS denominator.
+    replay_buffer = deque(maxlen=REPLAY_K)
 
     while total_training_time < TIME_BUDGET:
         t0 = time.time()
@@ -890,7 +1227,10 @@ if __name__ == "__main__":
         total_episodes += len(rollout["episode_rewards"])
         all_episode_rewards.extend(rollout["episode_rewards"])
 
-        losses = ppo_update(model, optimizer, rollout)
+        combined = combine_with_replay(rollout, replay_buffer) if REPLAY_K > 0 else rollout
+        losses = ppo_update(model, optimizer, combined)
+        if REPLAY_K > 0 and rollout["obs"]:
+            replay_buffer.append(rollout)
 
         t1 = time.time()
         dt = t1 - t0

@@ -3,6 +3,7 @@ import { gameReducer } from '../engine/reducer'
 import { createGame } from '../engine/setup'
 import { GameState, GameAction, TileColor, LeaderColor } from '../engine/types'
 import { getAIAction } from '../ai/simpleAI'
+import { activePlayerIndex } from '../bridge/encoder'
 
 interface UseGameReturn {
   state: GameState
@@ -71,18 +72,23 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
     }
   }, [])
 
-  // Auto-trigger AI turns
+  // Auto-trigger AI turns. The "active player" depends on the phase: in
+  // conflictSupport it's whichever side hasn't committed (often the
+  // defender, NOT state.currentPlayer). Dispatching with the wrong
+  // playerIndex would make the reducer throw and the trigger would loop
+  // forever, so we compute the active player here too.
   useEffect(() => {
-    const player = state.players[state.currentPlayer]
-    if (!player.isAI) return
     if (state.turnPhase === 'gameOver') return
+    const activeIdx = activePlayerIndex(state)
+    const player = state.players[activeIdx]
+    if (!player.isAI) return
 
     let cancelled = false
     const timeout = setTimeout(async () => {
       try {
         const action = await policy(state)
         if (cancelled) return
-        dispatch({ ...action, playerIndex: state.currentPlayer })
+        dispatch({ ...action, playerIndex: activeIdx })
       } catch (err) {
         console.error('AI policy failed:', err)
       }

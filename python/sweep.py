@@ -28,11 +28,11 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 
 DEFAULT_GRID: dict[str, list[str]] = {
-    # Most-impactful knobs first; comment-out to skip a dimension.
-    # Default grid is intentionally small (4 cells) — edit before kicking off
-    # a real sweep so you don't spawn 24+ hours of work by accident.
-    "BC_COEF": ["0.0", "0.1"],
-    "POOL_OPPONENT_PROB": ["0.5", "0.7"],
+    # Phase 11.3 — reward sparsity ablation. Probes whether the dense
+    # shaping (min-score delta + margin delta) is genuinely helping or just
+    # adding noise. 6 cells × time_budget per cell.
+    "SCORE_DELTA_COEF": ["0.0", "0.5", "1.5"],
+    "MARGIN_DELTA_COEF": ["0.0", "1.0"],
 }
 
 # Metrics to extract from train.py stdout. Order matters: first is the

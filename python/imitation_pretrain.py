@@ -32,7 +32,10 @@ from torch.distributions import Categorical
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from tigphrates_env import BridgeProcess
-from train import PolicyValueNetwork, obs_to_tensors, stack_obs, DEVICE
+from train import (
+    PolicyValueNetwork, obs_to_tensors, stack_obs, DEVICE,
+    FLAT_TO_TYPE, FLAT_TO_PARAM, TYPE_BASES_T, _adapt_state_dict,
+)
 from policy_server import _build_policy_obs
 
 
@@ -75,11 +78,22 @@ def collect_traces(
                     obs = _build_policy_obs(obs_raw)
                     mask = np.array(va["mask"], dtype=np.int8)
                     obs_t = obs_to_tensors(obs)
-                    mask_t = torch.tensor(mask, dtype=torch.bool, device=obs_t["board"].device)
                     with torch.no_grad():
-                        logits, _ = expert_model.forward(obs_t)
-                        logits = logits.masked_fill(~mask_t, float("-inf"))
-                        action_index = int(logits.argmax(dim=-1).item())
+                        type_logits, param_logits, _ = expert_model.forward(obs_t)
+                        type_dist, param_padded, _ = expert_model.hierarchical_dists(
+                            type_logits, param_logits, mask
+                        )
+                        # Hierarchical argmax: pick best type, then best param
+                        # within that type. Same decoding the browser ONNX
+                        # path uses so behavior matches across surfaces.
+                        type_idx = type_dist.logits.argmax(dim=-1)
+                        chosen_logits = param_padded[
+                            torch.arange(1, device=type_idx.device), type_idx
+                        ]
+                        param_idx = chosen_logits.argmax(dim=-1)
+                        action_index = int(
+                            (TYPE_BASES_T.to(type_idx.device)[type_idx] + param_idx).item()
+                        )
                     decoded = bridge.call("decode_action", {
                         "gameId": gid, "actionIndex": action_index,
                     })
@@ -139,17 +153,35 @@ def train_bc(
             obs_batch = stack_obs([t["obs"] for t in batch])
             actions = torch.tensor([t["action"] for t in batch], dtype=torch.long, device=DEVICE)
             masks = np.stack([t["mask"] for t in batch], axis=0)
-            mask_t = torch.tensor(masks, dtype=torch.bool, device=DEVICE)
 
-            logits, values = model.forward(obs_batch)
-            logits = logits.masked_fill(~mask_t, float("-inf"))
-            log_probs = F.log_softmax(logits, dim=-1)
-            picked = log_probs.gather(1, actions.unsqueeze(1)).squeeze(1)
-            ce_loss = -picked.mean()
+            type_logits, param_logits, values = model.forward(obs_batch)
+            type_dist, param_padded, _type_mask = model.hierarchical_dists(
+                type_logits, param_logits, masks
+            )
+            B = type_logits.shape[0]
+            device = type_logits.device
 
-            # Predicted accuracy (argmax of legal actions).
-            preds = logits.argmax(dim=-1)
-            acc = (preds == actions).float().mean().item()
+            # Decompose target action into (type, param) and CE each head.
+            flat_to_type = FLAT_TO_TYPE.to(device)
+            flat_to_param = FLAT_TO_PARAM.to(device)
+            target_type = flat_to_type[actions]
+            target_param = flat_to_param[actions]
+
+            # type_dist.logits is already log-softmax (Categorical normalizes).
+            type_ce = F.nll_loss(type_dist.logits, target_type)
+
+            chosen_param_logits = param_padded[torch.arange(B, device=device), target_type]
+            param_log_probs = F.log_softmax(chosen_param_logits, dim=-1)
+            param_ce = F.nll_loss(param_log_probs, target_param)
+            ce_loss = type_ce + param_ce
+
+            # Predicted accuracy: hierarchical argmax matches the heuristic's
+            # exact (type, param). Stricter than the old flat argmax, since a
+            # mismatch on either head counts as wrong.
+            pred_type = type_dist.logits.argmax(dim=-1)
+            pred_chosen = param_padded[torch.arange(B, device=device), pred_type]
+            pred_param = pred_chosen.argmax(dim=-1)
+            acc = ((pred_type == target_type) & (pred_param == target_param)).float().mean().item()
 
             value_target = torch.zeros_like(values)
             v_loss = F.mse_loss(values, value_target)
@@ -195,7 +227,8 @@ def main():
             print(f"--expert path not found: {expert_path}", file=sys.stderr)
             sys.exit(2)
         expert_model = PolicyValueNetwork()
-        expert_model.load_state_dict(torch.load(expert_path, map_location="cpu"))
+        raw = torch.load(expert_path, map_location="cpu")
+        expert_model.load_state_dict(_adapt_state_dict(raw), strict=False)
         expert_model.train(False)
         expert_model.to(DEVICE)
         print(f"Using {expert_path} as demonstrator (self-imitation)")
