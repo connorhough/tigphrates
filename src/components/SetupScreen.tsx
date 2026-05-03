@@ -83,28 +83,33 @@ export function SetupScreen({ onStartGame, onOpenLab, initialSeatPolicies }: Set
   }
 
   return (
+    // Outer: vertical scroll when content overflows (landscape phone height
+    // is ~414px and the full setup form is ~600px). Card is centered
+    // horizontally via margin:auto; vertical centering is inline padding so
+    // we never clip the top off-screen with `align-items:center` overflow.
     <div style={{
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      height: '100%',
-      padding: 'calc(20px + var(--sat)) calc(20px + var(--sal)) calc(20px + var(--sab)) calc(20px + var(--sar))',
+      height: '100%', overflowY: 'auto',
+      padding: 'calc(12px + var(--sat)) calc(12px + var(--sal)) calc(12px + var(--sab)) calc(12px + var(--sar))',
       background: 'var(--paper)',
+      WebkitOverflowScrolling: 'touch',
     }}>
       <div style={{
-        background: 'var(--paper-dark)', padding: '28px 24px',
-        width: '100%', maxWidth: 420, border: '1px solid var(--rule)',
+        background: 'var(--paper-dark)', padding: '18px 18px',
+        width: '100%', maxWidth: 420, margin: '0 auto',
+        border: '1px solid var(--rule)',
       }}>
         <h1 style={{
-          margin: '0 0 4px', fontFamily: 'var(--font-display)',
-          fontSize: 26, fontWeight: 700, color: 'var(--ink)',
+          margin: '0 0 2px', fontFamily: 'var(--font-display)',
+          fontSize: 22, fontWeight: 700, color: 'var(--ink)',
           textAlign: 'center', letterSpacing: 0.5,
         }}>Tigris &amp; Euphrates</h1>
         <p style={{
-          margin: '0 0 24px', fontFamily: 'var(--font-mono)',
+          margin: '0 0 14px', fontFamily: 'var(--font-mono)',
           fontSize: 10, color: 'var(--ink-faint)', textAlign: 'center',
           textTransform: 'uppercase', letterSpacing: 2,
         }}>Mesopotamia · 3500 BC</p>
 
-        <div style={{ marginBottom: 20 }}>
+        <div style={{ marginBottom: 12 }}>
           <label style={labelStyle}>Players</label>
           <div style={{ display: 'flex', gap: 6 }}>
             {[2, 3, 4].map((n) => (
@@ -112,11 +117,11 @@ export function SetupScreen({ onStartGame, onOpenLab, initialSeatPolicies }: Set
                 key={n}
                 onClick={() => setPlayerCount(n)}
                 style={{
-                  flex: 1, padding: '12px', minHeight: 48,
+                  flex: 1, padding: '8px', minHeight: 40,
                   border: playerCount === n ? '1px solid var(--accent)' : '1px solid var(--rule)',
                   background: playerCount === n ? 'var(--paper-light)' : 'var(--paper)',
                   color: playerCount === n ? 'var(--accent)' : 'var(--ink-light)',
-                  fontFamily: 'var(--font-display)', fontSize: 18, fontWeight: 700,
+                  fontFamily: 'var(--font-display)', fontSize: 16, fontWeight: 700,
                   cursor: 'pointer',
                 }}
               >{n}</button>
@@ -124,31 +129,31 @@ export function SetupScreen({ onStartGame, onOpenLab, initialSeatPolicies }: Set
           </div>
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 24 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
           {Array.from({ length: playerCount }, (_, i) => {
             const dynasty = DYNASTIES[i]
             const seat = seats[i]
             const isHuman = seat.kind === 'human'
             return (
               <div key={i} style={{
-                display: 'flex', flexDirection: 'column', gap: 6,
-                padding: '10px 14px', background: 'var(--paper)',
+                display: 'flex', flexDirection: 'column', gap: 4,
+                padding: '6px 10px', background: 'var(--paper)',
                 border: '1px solid var(--rule)', borderLeft: `3px solid ${dynasty.color}`,
               }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <span style={{ fontSize: 22 }}>{dynasty.symbol}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 18 }}>{dynasty.symbol}</span>
                   <span style={{
                     flex: 1, fontFamily: 'var(--font-display)',
-                    fontSize: 14, fontWeight: 700, color: dynasty.color,
+                    fontSize: 13, fontWeight: 700, color: dynasty.color,
                   }}>{dynasty.name}</span>
                   <button
                     onClick={() => toggleHuman(i)}
                     style={{
-                      padding: '8px 14px', minHeight: 36, minWidth: 72,
+                      padding: '4px 10px', minHeight: 28, minWidth: 60,
                       border: '1px solid var(--rule)',
                       background: isHuman ? 'var(--paper-light)' : 'var(--paper-dark)',
                       color: isHuman ? dynasty.color : 'var(--ink-faint)',
-                      fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 500,
+                      fontFamily: 'var(--font-mono)', fontSize: 10, fontWeight: 500,
                       textTransform: 'uppercase', letterSpacing: 1, cursor: 'pointer',
                     }}
                   >{isHuman ? 'Human' : 'AI'}</button>
@@ -158,10 +163,10 @@ export function SetupScreen({ onStartGame, onOpenLab, initialSeatPolicies }: Set
                     value={kindForPolicy(seat)}
                     onChange={e => setSeatKind(i, e.target.value)}
                     style={{
-                      width: '100%', padding: '6px 8px',
+                      width: '100%', padding: '4px 6px', minHeight: 28,
                       border: '1px solid var(--rule)', background: 'var(--paper)',
                       color: 'var(--ink-light)',
-                      fontFamily: 'var(--font-mono)', fontSize: 11,
+                      fontFamily: 'var(--font-mono)', fontSize: 10,
                     }}
                   >
                     <option value="heuristic">Heuristic</option>
@@ -181,30 +186,32 @@ export function SetupScreen({ onStartGame, onOpenLab, initialSeatPolicies }: Set
           })}
         </div>
 
-        <button
-          onClick={handleStart}
-          style={{
-            width: '100%', padding: 14, minHeight: 52, marginBottom: 8,
-            border: '1px solid var(--accent)', background: 'var(--paper-light)',
-            color: 'var(--accent)', fontFamily: 'var(--font-mono)',
-            fontSize: 13, fontWeight: 500, cursor: 'pointer',
-            textTransform: 'uppercase', letterSpacing: 2,
-          }}
-        >Start Game</button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            onClick={handleStart}
+            style={{
+              flex: 2, padding: 10, minHeight: 40,
+              border: '1px solid var(--accent)', background: 'var(--paper-light)',
+              color: 'var(--accent)', fontFamily: 'var(--font-mono)',
+              fontSize: 12, fontWeight: 500, cursor: 'pointer',
+              textTransform: 'uppercase', letterSpacing: 2,
+            }}
+          >Start</button>
 
-        <button
-          onClick={onOpenLab}
-          style={{
-            width: '100%', padding: 10, minHeight: 40,
-            border: '1px solid var(--rule)', background: 'var(--paper)',
-            color: 'var(--ink-light)', fontFamily: 'var(--font-mono)',
-            fontSize: 11, cursor: 'pointer',
-            textTransform: 'uppercase', letterSpacing: 1,
-          }}
-        >Open Lab →</button>
+          <button
+            onClick={onOpenLab}
+            style={{
+              flex: 1, padding: 10, minHeight: 40,
+              border: '1px solid var(--rule)', background: 'var(--paper)',
+              color: 'var(--ink-light)', fontFamily: 'var(--font-mono)',
+              fontSize: 11, cursor: 'pointer',
+              textTransform: 'uppercase', letterSpacing: 1,
+            }}
+          >Lab →</button>
+        </div>
 
         <p style={{
-          margin: '12px 0 0', fontFamily: 'var(--font-mono)', fontSize: 9,
+          margin: '8px 0 0', fontFamily: 'var(--font-mono)', fontSize: 9,
           color: 'var(--ink-faint)', textAlign: 'center', letterSpacing: 0.5,
         }}>
           Lab server: {labReachable === null ? 'checking…' : labReachable ? `online (${labMembers.length} pool)` : 'offline (start python/policy_server.py)'}
