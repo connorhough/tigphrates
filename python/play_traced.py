@@ -124,11 +124,15 @@ def _model_action_with_telemetry(
     param_idx_argmax = int(param_probs_argmax.argmax())
     argmax_action_index = TYPE_BASES[type_idx_argmax] + param_idx_argmax
 
-    # Sampled pick (training-time behavior)
-    type_sampled = int(torch.distributions.Categorical(probs=torch.tensor(type_probs)).sample().item())
+    # Sample directly from the mask-aware Categoricals; avoids the
+    # softmax-roundtrip path where -inf logits could become tiny non-zero
+    # probs and theoretically allow an illegal sample.
+    type_sampled = int(type_dist.sample().item())
     chosen_logits_sampled = param_padded[0, type_sampled]
-    param_probs_sampled = torch.softmax(chosen_logits_sampled, dim=-1).cpu().numpy()
-    param_sampled = int(torch.distributions.Categorical(probs=torch.tensor(param_probs_sampled)).sample().item())
+    # param_padded already has -inf in invalid slots; build a Categorical
+    # from the masked logits directly rather than from softmax probs.
+    param_dist_sampled = torch.distributions.Categorical(logits=chosen_logits_sampled)
+    param_sampled = int(param_dist_sampled.sample().item())
     sampled_action_index = TYPE_BASES[type_sampled] + param_sampled
 
     # Top-5 type telemetry
@@ -178,42 +182,66 @@ def _play_single_game(
                 tel = _model_action_with_telemetry(model, obs_raw, mask)
                 # Use sampled action by default (matches training rollout behavior).
                 action_index = tel["sampled_action_index"]
-                decoded = bridge.call("decode_action", {"gameId": gid, "actionIndex": action_index})
-                records.append({
-                    "turn": len(records),
-                    "active_player": active,
-                    "model_player": True,
-                    "phase": va["turnPhase"],
-                    "chosen_action": {
-                        "action_index": action_index,
-                        "label": decoded.get("label", ""),
-                        "argmax_action_index": tel["argmax_action_index"],
-                        "sampled_action_index": tel["sampled_action_index"],
-                    },
-                    "type_top5": tel["type_top5"],
-                    "param_top5_for_chosen_type": tel["param_top5_for_chosen_type"],
-                    "value_estimate": tel["value_estimate"],
-                })
-                bridge.call("step_action", {"gameId": gid, "action": decoded["action"], "playerIndex": active})
+                try:
+                    decoded = bridge.call("decode_action", {"gameId": gid, "actionIndex": action_index})
+                    records.append({
+                        "turn": len(records),
+                        "active_player": active,
+                        "model_player": True,
+                        "phase": va["turnPhase"],
+                        "chosen_action": {
+                            "action_index": action_index,
+                            "label": decoded.get("label", ""),
+                            "argmax_action_index": tel["argmax_action_index"],
+                            "sampled_action_index": tel["sampled_action_index"],
+                        },
+                        "type_top5": tel["type_top5"],
+                        "param_top5_for_chosen_type": tel["param_top5_for_chosen_type"],
+                        "value_estimate": tel["value_estimate"],
+                    })
+                    bridge.call("step_action", {"gameId": gid, "action": decoded["action"], "playerIndex": active})
+                except Exception as e:
+                    print(f"[play_traced] bridge error at turn {len(records)} for action_index={action_index}: {e}", file=sys.stderr)
+                    records.append({
+                        "turn": len(records),
+                        "active_player": active,
+                        "model_player": is_model,
+                        "phase": va["turnPhase"],
+                        "error": f"bridge_rpc_failure: {type(e).__name__}: {e}",
+                        "chosen_action": {"action_index": action_index, "label": "<rpc_failure>"},
+                    })
+                    break
             else:
                 ai = bridge.call("ai_action", {"gameId": gid})
                 action_index = int(ai.get("actionIndex", -1))
                 if action_index < 0:
                     break
-                decoded = bridge.call("decode_action", {"gameId": gid, "actionIndex": action_index})
-                records.append({
-                    "turn": len(records),
-                    "active_player": active,
-                    "model_player": False,
-                    "phase": va["turnPhase"],
-                    "chosen_action": {
-                        "action_index": action_index,
-                        "label": decoded.get("label", ""),
-                        "argmax_action_index": action_index,
-                        "sampled_action_index": action_index,
-                    },
-                })
-                bridge.call("step_action", {"gameId": gid, "action": ai["action"], "playerIndex": active})
+                try:
+                    decoded = bridge.call("decode_action", {"gameId": gid, "actionIndex": action_index})
+                    records.append({
+                        "turn": len(records),
+                        "active_player": active,
+                        "model_player": False,
+                        "phase": va["turnPhase"],
+                        "chosen_action": {
+                            "action_index": action_index,
+                            "label": decoded.get("label", ""),
+                            "argmax_action_index": action_index,
+                            "sampled_action_index": action_index,
+                        },
+                    })
+                    bridge.call("step_action", {"gameId": gid, "action": ai["action"], "playerIndex": active})
+                except Exception as e:
+                    print(f"[play_traced] bridge error at turn {len(records)} for action_index={action_index}: {e}", file=sys.stderr)
+                    records.append({
+                        "turn": len(records),
+                        "active_player": active,
+                        "model_player": False,
+                        "phase": va["turnPhase"],
+                        "error": f"bridge_rpc_failure: {type(e).__name__}: {e}",
+                        "chosen_action": {"action_index": action_index, "label": "<rpc_failure>"},
+                    })
+                    break
     finally:
         try:
             bridge.call("delete_game", {"gameId": gid})
