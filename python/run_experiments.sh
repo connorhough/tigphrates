@@ -93,6 +93,83 @@ log_result() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$commit" "$wr" "$ms" "$status" "$desc" >> "$TSV"
 }
 
+# --- Helper: generate move traces for a kept commit. ---
+generate_traces() {
+  local commit="$1"
+  local out="traces/${commit}"
+  if [[ -d "$out" ]] && compgen -G "${out}/game_*.jsonl" >/dev/null; then
+    echo ">>> Traces already exist for ${commit}, skipping generation."
+    return 0
+  fi
+  python3 python/play_traced.py \
+    --out-dir "$out" \
+    --games-vs-heuristic "${TRACED_VS_HEURISTIC:-3}" \
+    --games-vs-champion "${TRACED_VS_CHAMPION:-2}" \
+    --max-turns "${TRACED_MAX_TURNS:-1200}" \
+    >> "$LOG.traces" 2>&1
+  local rc=$?
+  prune_traces
+  return $rc
+}
+
+# --- Helper: ask the expert agent for a critique. ---
+run_expert_agent() {
+  local commit="$1"
+  local traces_dir="traces/${commit}"
+  local critique="${traces_dir}/critique.md"
+  local shaping="models/shaping_config.json"
+  local num_games
+  num_games=$(ls "$traces_dir"/game_*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$num_games" -eq 0 ]] && return 1
+  local prompt
+  prompt=$(sed \
+    -e "s|{{TRACES_DIR}}|$traces_dir|g" \
+    -e "s|{{NUM_GAMES}}|$num_games|g" \
+    -e "s|{{SHAPING_CONFIG_PATH}}|$shaping|g" \
+    -e "s|{{CRITIQUE_PATH}}|$critique|g" \
+    prompts/rl_expert.md)
+  claude --print --output-format text \
+    --model claude-sonnet-4-6 \
+    --allowedTools Read,Glob,Grep \
+    -p "$prompt" > "$critique" 2>> "$LOG.expert"
+  [[ -s "$critique" ]]
+}
+
+# --- Helper: ask the DS agent to edit train.py. ---
+run_ds_agent() {
+  local commit="$1"
+  local critique="traces/${commit}/critique.md"
+  local shaping="models/shaping_config.json"
+  [[ -s "$critique" ]] || return 1
+  local prompt
+  prompt=$(sed \
+    -e "s|{{CRITIQUE_PATH}}|$critique|g" \
+    -e "s|{{SHAPING_CONFIG_PATH}}|$shaping|g" \
+    -e "s|{{RESULTS_TSV}}|$TSV|g" \
+    prompts/rl_ds.md)
+  claude --print --output-format text \
+    --model claude-sonnet-4-6 \
+    --allowedTools Edit,Read,Bash,Grep,Glob \
+    -p "$prompt" >> "$LOG.ds" 2>&1
+  # The DS agent commits its own edit. We just check that something
+  # actually changed since the trainer's commit.
+  ! git diff --quiet HEAD~1 HEAD -- python/train.py
+}
+
+# --- Helper: keep only the most recent N trace directories. ---
+prune_traces() {
+  local keep="${TRACE_RETENTION:-10}"
+  if [[ ! -d traces ]]; then return 0; fi
+  local dirs
+  mapfile -t dirs < <(ls -1dt traces/*/ 2>/dev/null || true)
+  local n="${#dirs[@]}"
+  if (( n <= keep )); then return 0; fi
+  local i
+  for (( i=keep; i<n; i++ )); do
+    rm -rf "${dirs[$i]}"
+  done
+}
+
 # --- Helper: discard last experiment (revert only train.py, not whole tree) ---
 discard_last_experiment() {
   git checkout HEAD~1 -- python/train.py
@@ -176,8 +253,11 @@ for ((run=1; run<=MAX_RUNS; run++)); do
 
   if [[ "$run" -eq 1 ]]; then
     echo ">>> Baseline run (no changes)"
+  elif [[ -f ".autoresearch_ds_pending" ]]; then
+    echo ">>> Using edit produced by DS agent in previous iteration."
+    rm -f ".autoresearch_ds_pending"
   else
-    echo ">>> Asking Claude for next experiment..."
+    echo ">>> Asking Claude for next experiment (fallback path)..."
     ask_claude_for_edit
   fi
 
@@ -236,6 +316,19 @@ for ((run=1; run<=MAX_RUNS; run++)); do
         if [[ -f "models/policy_final.pt" ]]; then
           cp "models/policy_final.pt" "models/policy_best.pt"
           echo ">>> Saved best model to models/policy_best.pt"
+        fi
+        # New: trace + expert + DS chain. Each step has a fallback so a
+        # failure here does not wedge the loop.
+        if generate_traces "$commit"; then
+          if run_expert_agent "$commit" && run_ds_agent "$commit"; then
+            echo ">>> Trace+expert+DS chain succeeded; next iteration will run the new edit."
+            touch ".autoresearch_ds_pending"
+            continue  # skip the legacy ask_claude_for_edit at top of next iter
+          else
+            echo ">>> Expert/DS agent failed; falling back to legacy direct-edit path."
+          fi
+        else
+          echo ">>> Trace generation failed; falling back to legacy direct-edit path."
         fi
       else
         echo ">>> No improvement on ${criterion} (${new} <= ${prev}). Discarding."

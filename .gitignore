@@ -35,3 +35,4 @@ run.log*
 # Local agent / session prompts (not project artifacts)
 IMPLEMENTER_PROMPT.md
 .worktrees/
+.autoresearch_ds_pending
