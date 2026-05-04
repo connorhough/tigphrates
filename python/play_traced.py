@@ -6,7 +6,7 @@ JSON object per line into traces/<out_dir>/game_<i>.jsonl.
 
 Task 5 adds: real model inference on the model's seat, and per-move
 telemetry (top-K type probs, value estimate, argmax/sampled indices).
-Multi-opponent matching (champion) is added in Task 6.
+Task 6 adds: champion-opponent matches via pool elo.json.
 
 Usage:
     python python/play_traced.py \
@@ -93,6 +93,41 @@ def _load_model(model_path: pathlib.Path) -> PolicyValueNetwork:
     model.train(False)
     model.to(DEVICE)
     return model
+
+
+def _resolve_champion(pool_dir: pathlib.Path) -> pathlib.Path | None:
+    """Return the path to the highest-Elo .pt in the pool, or None if
+    the pool has no entries.
+
+    Schema (verified against python/evaluate.py:280-298 and live
+    models/pool/elo.json): a flat dict keyed by full filename
+    (including the .pt extension). The current agent's own rating
+    lives under "_agent" and must be excluded:
+
+        {"_agent": 1399.9, "policy_init.pt": 1456.3, ...}
+
+    Falls back to mtime when elo.json is missing, empty, or corrupt.
+    """
+    if not pool_dir.exists():
+        return None
+    elo_path = pool_dir / "elo.json"
+    if elo_path.exists():
+        try:
+            elo = json.loads(elo_path.read_text())
+            # Drop "_agent" and any non-numeric rows. Keys are full filenames.
+            candidates_by_rating = {
+                k: v for k, v in elo.items()
+                if k != "_agent" and isinstance(v, (int, float)) and k.endswith(".pt")
+            }
+            if candidates_by_rating:
+                top_filename = max(candidates_by_rating.items(), key=lambda kv: kv[1])[0]
+                p = pool_dir / top_filename
+                if p.exists():
+                    return p
+        except (json.JSONDecodeError, OSError):
+            pass
+    candidates = sorted(pool_dir.glob("policy_*.pt"), key=lambda p: p.stat().st_mtime)
+    return candidates[-1] if candidates else None
 
 
 @torch.no_grad()
@@ -189,6 +224,7 @@ def _play_single_game(
                         "active_player": active,
                         "model_player": True,
                         "phase": va["turnPhase"],
+                        "opponent_kind": "heuristic",
                         "chosen_action": {
                             "action_index": action_index,
                             "label": decoded.get("label", ""),
@@ -207,6 +243,7 @@ def _play_single_game(
                         "active_player": active,
                         "model_player": is_model,
                         "phase": va["turnPhase"],
+                        "opponent_kind": "heuristic",
                         "error": f"bridge_rpc_failure: {type(e).__name__}: {e}",
                         "chosen_action": {"action_index": action_index, "label": "<rpc_failure>"},
                     })
@@ -223,6 +260,7 @@ def _play_single_game(
                         "active_player": active,
                         "model_player": False,
                         "phase": va["turnPhase"],
+                        "opponent_kind": "heuristic",
                         "chosen_action": {
                             "action_index": action_index,
                             "label": decoded.get("label", ""),
@@ -238,10 +276,72 @@ def _play_single_game(
                         "active_player": active,
                         "model_player": False,
                         "phase": va["turnPhase"],
+                        "opponent_kind": "heuristic",
                         "error": f"bridge_rpc_failure: {type(e).__name__}: {e}",
                         "chosen_action": {"action_index": action_index, "label": "<rpc_failure>"},
                     })
                     break
+    finally:
+        try:
+            bridge.call("delete_game", {"gameId": gid})
+        except Exception:
+            pass
+    return records
+
+
+def _play_single_game_two_models(
+    bridge: BridgeProcess,
+    *,
+    challenger: PolicyValueNetwork,
+    champion: PolicyValueNetwork,
+    challenger_seat: int,
+    max_turns: int,
+) -> list[dict]:
+    create = bridge.call("create", {"playerCount": PLAYER_COUNT})
+    gid = create["gameId"]
+    records: list[dict] = []
+    try:
+        for _ in range(max_turns):
+            va = bridge.call("valid_actions", {"gameId": gid})
+            if va["turnPhase"] == "gameOver":
+                break
+            active = va["activePlayer"]
+            mask = np.array(va["mask"], dtype=np.int8)
+            obs_raw = bridge.call("get_observation", {"gameId": gid, "playerIndex": active})
+            seat_model = challenger if active == challenger_seat else champion
+            tel = _model_action_with_telemetry(seat_model, obs_raw, mask)
+            action_index = tel["sampled_action_index"]
+            try:
+                decoded = bridge.call("decode_action", {"gameId": gid, "actionIndex": action_index})
+                records.append({
+                    "turn": len(records),
+                    "active_player": active,
+                    "model_player": active == challenger_seat,
+                    "phase": va["turnPhase"],
+                    "opponent_kind": "champion",
+                    "chosen_action": {
+                        "action_index": action_index,
+                        "label": decoded.get("label", ""),
+                        "argmax_action_index": tel["argmax_action_index"],
+                        "sampled_action_index": tel["sampled_action_index"],
+                    },
+                    "type_top5": tel["type_top5"],
+                    "param_top5_for_chosen_type": tel["param_top5_for_chosen_type"],
+                    "value_estimate": tel["value_estimate"],
+                })
+                bridge.call("step_action", {"gameId": gid, "action": decoded["action"], "playerIndex": active})
+            except Exception as e:
+                print(f"[play_traced] bridge error at turn {len(records)} for action_index={action_index}: {e}", file=sys.stderr)
+                records.append({
+                    "turn": len(records),
+                    "active_player": active,
+                    "model_player": active == challenger_seat,
+                    "phase": va["turnPhase"],
+                    "opponent_kind": "champion",
+                    "error": f"bridge_rpc_failure: {type(e).__name__}: {e}",
+                    "chosen_action": {"action_index": action_index, "label": "<rpc_failure>"},
+                })
+                break
     finally:
         try:
             bridge.call("delete_game", {"gameId": gid})
@@ -262,27 +362,43 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Generate move traces from a trained checkpoint.")
     p.add_argument("--out-dir", type=pathlib.Path, required=True)
     p.add_argument("--games-vs-heuristic", type=int, default=3)
-    p.add_argument("--games-vs-champion", type=int, default=2,
-                   help="Reserved; champion-opponent path is implemented in Task 6.")
+    p.add_argument("--games-vs-champion", type=int, default=2)
     p.add_argument("--max-turns", type=int, default=1200)
     p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_final.pt"),
                    help="Default to policy_final.pt (updated every training run) rather "
                         "than policy_best.pt (which may be from an older architecture). "
                         "Set explicitly via --model-path if you want the all-time best.")
+    p.add_argument("--pool-dir", type=pathlib.Path, default=pathlib.Path("models/pool"))
     args = p.parse_args(argv)
 
     total = args.games_vs_heuristic + args.games_vs_champion
     if total <= 0:
         return 0
 
-    model = _load_model(args.model_path)
+    challenger = _load_model(args.model_path)
     bridge = BridgeProcess()
     try:
         game_idx = 0
         for _ in range(args.games_vs_heuristic):
-            records = _play_single_game(bridge, model=model, model_seat=0, max_turns=args.max_turns)
+            records = _play_single_game(bridge, model=challenger, model_seat=0, max_turns=args.max_turns)
             _write_jsonl(args.out_dir / f"game_{game_idx:02d}.jsonl", records)
             game_idx += 1
+        if args.games_vs_champion > 0:
+            champ_path = _resolve_champion(args.pool_dir)
+            if champ_path is None:
+                print(f"[play_traced] no champion in {args.pool_dir}; skipping champion games", file=sys.stderr)
+            else:
+                champion = _load_model(champ_path)
+                for _ in range(args.games_vs_champion):
+                    records = _play_single_game_two_models(
+                        bridge,
+                        challenger=challenger,
+                        champion=champion,
+                        challenger_seat=0,
+                        max_turns=args.max_turns,
+                    )
+                    _write_jsonl(args.out_dir / f"game_{game_idx:02d}.jsonl", records)
+                    game_idx += 1
     finally:
         bridge.close()
     return 0

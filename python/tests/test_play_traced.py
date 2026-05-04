@@ -69,3 +69,43 @@ def test_zero_games_is_noop(tmp_path):
     )
     assert res.returncode == 0
     assert not out_dir.exists() or not list(out_dir.glob("game_*.jsonl"))
+
+
+def test_two_games_vs_champion_when_pool_has_champion(tmp_path, monkeypatch):
+    """If a pool exists with at least one snapshot, --games-vs-champion=2
+    produces 2 additional trace files for the champion match-up.
+
+    Schema note: elo.json is a flat dict keyed by full filename
+    (including the .pt extension). The agent's own rating lives under
+    the "_agent" key and must be excluded from champion candidates.
+    See python/evaluate.py:280-298 for the canonical reader/writer.
+    """
+    pool_dir = tmp_path / "pool"
+    pool_dir.mkdir()
+    # Flat schema: keys are filenames including ".pt"; "_agent" is the
+    # current agent's rating and must NOT be considered a champion.
+    (pool_dir / "elo.json").write_text(json.dumps({
+        "_agent": 1500.0,
+        "policy_v0.pt": 1600.0,
+        "policy_v1.pt": 1550.0,
+    }))
+    # The script will pick policy_v0.pt (highest non-_agent rating).
+    src_best = pathlib.Path("models/policy_final.pt")
+    if not src_best.exists():
+        pytest.skip("models/policy_final.pt not present — champion path needs a real checkpoint")
+    (pool_dir / "policy_v0.pt").write_bytes(src_best.read_bytes())
+
+    out_dir = tmp_path / "traces" / "champ"
+    res = _run(
+        "--out-dir", str(out_dir),
+        "--games-vs-heuristic", "0",
+        "--games-vs-champion", "2",
+        "--max-turns", "60",
+        "--pool-dir", str(pool_dir),
+    )
+    assert res.returncode == 0, f"stderr:\n{res.stderr}\nstdout:\n{res.stdout}"
+    files = sorted(out_dir.glob("game_*.jsonl"))
+    assert len(files) == 2
+    # Champion games should be tagged in the records.
+    first_record = json.loads(files[0].read_text().splitlines()[0])
+    assert first_record.get("opponent_kind") == "champion"
