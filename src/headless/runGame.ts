@@ -1,8 +1,11 @@
-import { GameState, GameAction, TileColor, TurnPhase } from '../engine/types'
+import { GameState, GameAction, TurnPhase } from '../engine/types'
 import { createGame } from '../engine/setup'
 import { gameReducer } from '../engine/reducer'
 import { getAIAction } from '../ai/simpleAI'
 import { getHeadlessOnnxAction } from './onnxAdapter'
+import {
+  handSummary, scoreSnapshot, formatActionLine, conflictResolutionLine,
+} from '../engine/logFormat'
 
 export type AiKind = 'simple' | 'onnx'
 export type GetActionFn = (state: GameState, playerIndex: number) => GameAction | Promise<GameAction>
@@ -30,79 +33,8 @@ function makeGetAction(kinds: AiKind[], onnxModelPath: string): GetActionFn {
 
 let _warnedOnnxFallback = false
 
-// --- Compact log notation ---
-// Colors: R=red B=blue G=green K=black
-// Actions: T=placeTile L=placeLeader W=withdraw C=catastrophe S=swap P=pass
-//          CS=commitSupport WO=warOrder BM=buildMonument DM=declineMonument
-// Positions: row.col (e.g. 3.5)
-// Score deltas: +1R +2B etc.
-// Turn header: === T<n> P<n>(<dynasty>) === (with hand summary)
-// Conflicts: REVOLT or WAR with attacker/defender/result
-// Fallback actions marked with !fb
-
-const C: Record<string, string> = { red: 'R', blue: 'B', green: 'G', black: 'K' }
-
-function pos(r: number, c: number): string { return `${r}.${c}` }
-
-function handSummary(hand: TileColor[]): string {
-  const counts: Record<string, number> = {}
-  for (const t of hand) counts[C[t]] = (counts[C[t]] || 0) + 1
-  return Object.entries(counts).map(([c, n]) => `${n}${c}`).join('') || '(empty)'
-}
-
-function scoreDelta(
-  before: Record<TileColor, number>,
-  after: Record<TileColor, number>,
-): string {
-  const parts: string[] = []
-  for (const color of ['red', 'blue', 'green', 'black'] as TileColor[]) {
-    const diff = after[color] - before[color]
-    if (diff > 0) parts.push(`+${diff}${C[color]}`)
-  }
-  return parts.join(' ')
-}
-
-function treasureDelta(before: number, after: number): string {
-  const diff = after - before
-  return diff > 0 ? ` +${diff}tr` : ''
-}
-
-function scoreSnapshot(players: GameState['players']): string {
-  return players.map((p, i) =>
-    `P${i + 1}[${C.red}${p.score.red} ${C.blue}${p.score.blue} ${C.green}${p.score.green} ${C.black}${p.score.black} tr${p.treasures}]`,
-  ).join(' ')
-}
-
-function formatAction(action: GameAction): string {
-  switch (action.type) {
-    case 'placeTile': return `T:${C[action.color]}@${pos(action.position.row, action.position.col)}`
-    case 'placeLeader': return `L:${C[action.color]}@${pos(action.position.row, action.position.col)}`
-    case 'withdrawLeader': return `W:${C[action.color]}`
-    case 'placeCatastrophe': return `C@${pos(action.position.row, action.position.col)}`
-    case 'swapTiles': return `S(${action.indices.length})`
-    case 'pass': return 'P'
-    case 'commitSupport': return `CS(${action.indices.length})`
-    case 'chooseWarOrder': return `WO:${C[action.color]}`
-    case 'buildMonument': return `BM:${action.monumentId}`
-    case 'declineMonument': return 'DM'
-    default: return '??'
-  }
-}
-
-function conflictLine(prev: GameState, next: GameState): string | null {
-  // Conflict just resolved: prev had pendingConflict, next doesn't (or has a different one)
-  const pc = prev.pendingConflict
-  if (!pc) return null
-  // Only log when conflict resolves (both sides committed and result applied)
-  if (next.pendingConflict === pc) return null
-  if (pc.attackerCommitted === null || pc.defenderCommitted === null) return null
-
-  const type = pc.type === 'revolt' ? 'REVOLT' : 'WAR'
-  const atkTotal = pc.attackerStrength + pc.attackerCommitted.length
-  const defTotal = pc.defenderStrength + pc.defenderCommitted.length
-  const winner = atkTotal > defTotal ? 'atk' : 'def'
-  return `  ${type}(${C[pc.color]}) P${pc.attacker.playerIndex + 1}(${atkTotal}) vs P${pc.defender.playerIndex + 1}(${defTotal}) -> ${winner} wins`
-}
+// Compact log notation lives in src/engine/logFormat.ts (shared with the
+// browser). See that module for the format spec.
 
 // --- Core types ---
 
@@ -213,30 +145,8 @@ export async function runGame(playerCountOrOpts: number | RunOptions, maxActions
     }
 
     if (logging) {
-      // Log the action
-      const actionStr = fallback
-        ? `${formatAction(action)}!fb`
-        : formatAction(action)
-
-      // Detect score/treasure changes for all players
-      const deltas: string[] = []
-      for (let i = 0; i < playerCount; i++) {
-        const sd = scoreDelta(prevState.players[i].score, state.players[i].score)
-        const td = treasureDelta(prevState.players[i].treasures, state.players[i].treasures)
-        if (sd || td) deltas.push(`P${i + 1}:${sd}${td}`)
-      }
-      const deltaStr = deltas.length ? ` [${deltas.join(', ')}]` : ''
-
-      // Phase transition info
-      let phaseStr = ''
-      if (state.turnPhase !== prevState.turnPhase && state.turnPhase !== 'action') {
-        phaseStr = ` ->${state.turnPhase}`
-      }
-
-      log.push(`  ${actionStr}${deltaStr}${phaseStr}`)
-
-      // Log conflict resolution
-      const cLine = conflictLine(prevState, state)
+      log.push(formatActionLine(action, prevState, state, fallback))
+      const cLine = conflictResolutionLine(prevState, state)
       if (cLine) log.push(cLine)
     }
 
