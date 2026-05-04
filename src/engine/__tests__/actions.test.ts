@@ -28,6 +28,26 @@ describe('swapTiles', () => {
     state.actionsRemaining = 0
     expect(() => applyAction(state, { type: 'swapTiles', indices: [0] })).toThrow()
   })
+
+  it('shrinks bag by drawCount (discards do not return to bag)', () => {
+    const state = createGame(2)
+    const bagBefore = state.bag.length
+    const result = applyAction(state, { type: 'swapTiles', indices: [0, 1, 2] })
+    expect(result.bag.length).toBe(bagBefore - 3)
+  })
+
+  it('discarded tiles never re-enter the bag', () => {
+    const state = createGame(2)
+    state.bag = ['red', 'blue']
+    state.players[0].hand = ['black', 'black']
+    const result = applyAction(state, { type: 'swapTiles', indices: [0, 1] })
+    expect(result.bag.filter(t => t === 'black').length).toBe(0)
+  })
+
+  it('throws if no indices supplied', () => {
+    const state = createGame(2)
+    expect(() => applyAction(state, { type: 'swapTiles', indices: [] })).toThrow()
+  })
 })
 
 describe('pass', () => {

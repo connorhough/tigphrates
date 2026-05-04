@@ -125,6 +125,10 @@ export function applyAction(state: GameState, action: GameAction): GameState {
 function handleSwapTiles(state: GameState, indices: number[]): GameState {
   const player = state.players[state.currentPlayer]
 
+  if (indices.length === 0) {
+    throw new Error('Must discard at least one tile')
+  }
+
   // Validate indices
   for (const idx of indices) {
     if (idx < 0 || idx >= player.hand.length) {
@@ -132,11 +136,10 @@ function handleSwapTiles(state: GameState, indices: number[]): GameState {
     }
   }
 
-  // Remove tiles at indices (process in descending order to preserve indices)
+  // Discard tiles at indices (out of game — do not return to bag).
+  // Process in descending order to preserve indices.
   const sortedIndices = [...indices].sort((a, b) => b - a)
   for (const idx of sortedIndices) {
-    // Return tile to bag
-    state.bag.push(player.hand[idx])
     player.hand.splice(idx, 1)
   }
 
@@ -205,6 +208,11 @@ function handlePlaceTile(state: GameState, color: TileColor, position: Position)
     }
   }
 
+  const distinctNeighborKingdoms = [...neighborKingdomsBefore.values()]
+  if (distinctNeighborKingdoms.length >= 3) {
+    throw new Error('Tile would unite 3 or more kingdoms')
+  }
+
   // Place tile on board
   cell.tile = color
 
@@ -212,7 +220,6 @@ function handlePlaceTile(state: GameState, color: TileColor, position: Position)
   player.hand.splice(tileIndex, 1)
 
   // Check if tile united two kingdoms (war detection)
-  const distinctNeighborKingdoms = [...neighborKingdomsBefore.values()]
   if (distinctNeighborKingdoms.length >= 2) {
     // Find leader colors that appear in multiple kingdoms
     const leaderColorsByKingdom = distinctNeighborKingdoms.map(k =>

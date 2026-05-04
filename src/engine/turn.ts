@@ -83,26 +83,26 @@ export function checkGameEnd(state: GameState): boolean {
 /**
  * Main end-of-turn processing. Mutates state (caller should clone if needed).
  *
- * 1. Monument scoring
- * 2. Treasure collection
- * 3. Draw tiles to refill hand to 6
+ * 1. Draw tiles to refill hand to 6
+ * 2. Monument scoring
+ * 3. Treasure collection
  * 4. Game end check
  * 5. Advance turn (if game not over)
  */
 export function endTurn(state: GameState): GameState {
-  // 1. Monument scoring
-  scoreMonuments(state)
-
-  // 2. Treasure collection
-  collectTreasures(state)
-
-  // 3. Draw tiles
+  // 1. Draw tiles
   const player = state.players[state.currentPlayer]
   const tilesToDraw = Math.min(6 - player.hand.length, state.bag.length)
   if (tilesToDraw > 0) {
     const drawn = state.bag.splice(0, tilesToDraw)
     player.hand.push(...drawn)
   }
+
+  // 2. Monument scoring
+  scoreMonuments(state)
+
+  // 3. Treasure collection
+  collectTreasures(state)
 
   // 4. Game end check
   if (checkGameEnd(state)) {

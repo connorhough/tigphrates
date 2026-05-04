@@ -115,6 +115,32 @@ describe('placeTile', () => {
     ).toThrow()
   })
 
+  it('throws if tile would unite 3 or more kingdoms', () => {
+    const state = makeTestState()
+    state.players[0].hand = ['red', 'red', 'red', 'red', 'red', 'red']
+
+    // Three separate kingdoms, each with a red temple + adjacent leader,
+    // all flanking the empty land cell (5,5) without touching each other.
+    state.board[3][5].tile = 'red'
+    state.board[4][5].leader = { color: 'red', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'red')!.position = { row: 4, col: 5 }
+
+    state.board[5][3].tile = 'red'
+    state.board[5][4].leader = { color: 'green', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'green')!.position = { row: 5, col: 4 }
+
+    state.board[5][7].tile = 'red'
+    state.board[5][6].leader = { color: 'blue', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'blue')!.position = { row: 5, col: 6 }
+
+    expect(state.board[5][5].terrain).toBe('land')
+    expect(state.board[5][5].tile).toBeNull()
+
+    expect(() =>
+      applyAction(state, { type: 'placeTile', color: 'red', position: { row: 5, col: 5 } })
+    ).toThrow(/3 or more kingdoms|unite/i)
+  })
+
   it('matching color leader scores over king', () => {
     const state = makeTestState()
     // Kingdom with both green leader and black leader (king)

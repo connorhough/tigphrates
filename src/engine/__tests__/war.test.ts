@@ -472,4 +472,54 @@ describe('war', () => {
     expect(result.turnPhase).toBe('action')
     expect(result.actionsRemaining).toBe(1)
   })
+
+  it('triggers monument choice when unification tile completes a non-war-color 2x2', () => {
+    const state = createGame(2)
+
+    // Pre-place green tiles forming three corners of a 2x2 at (4,4),(4,5),(5,4)
+    state.board[4][4].tile = 'green'
+    state.board[4][5].tile = 'green'
+    state.board[5][4].tile = 'green'
+
+    // Kingdom 1: red temple at (3,4) with player 0's black leader at (3,5).
+    // (3,5) is connected to kingdom via (3,4) red and (4,5) green.
+    state.board[3][4].tile = 'red'
+    state.board[3][4].hasTreasure = false
+    state.board[3][5].leader = { color: 'black', dynasty: 'archer' }
+    state.players[0].leaders.find(l => l.color === 'black')!.position = { row: 3, col: 5 }
+
+    // Kingdom 2: red temple at (6,5) with player 1's black leader at (6,6).
+    state.board[6][5].tile = 'red'
+    state.board[6][5].hasTreasure = false
+    state.board[6][6].leader = { color: 'black', dynasty: 'bull' }
+    state.players[1].leaders.find(l => l.color === 'black')!.position = { row: 6, col: 6 }
+
+    state.players[0].hand = ['green', 'green', 'green', 'green', 'green', 'green']
+    state.players[1].hand = ['green', 'green', 'green', 'green', 'green', 'green']
+
+    // Place green at (5,5) — completes the 2x2 of green AND unites both kingdoms,
+    // each containing a black leader → black war.
+    let result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 5, col: 5 } })
+    expect(result.turnPhase).toBe('conflictSupport')
+    expect(result.pendingConflict!.type).toBe('war')
+    expect(result.pendingConflict!.color).toBe('black')
+
+    // Both sides commit zero support → tie, defender wins.
+    result = applyAction(result, { type: 'commitSupport', indices: [] })
+    result = applyAction(result, { type: 'commitSupport', indices: [] })
+
+    // Green tiles forming the 2x2 should all survive (war color was black).
+    expect(result.board[4][4].tile).toBe('green')
+    expect(result.board[4][5].tile).toBe('green')
+    expect(result.board[5][4].tile).toBe('green')
+    expect(result.board[5][5].tile).toBe('green')
+
+    // The post-war monument check should fire.
+    expect(result.turnPhase).toBe('monumentChoice')
+    expect(result.pendingMonument).not.toBeNull()
+    expect(result.pendingMonument!.color).toBe('green')
+    expect(result.pendingMonument!.position).toEqual({ row: 4, col: 4 })
+    // actionsRemaining should NOT be decremented yet — that happens after monument choice.
+    expect(result.actionsRemaining).toBe(2)
+  })
 })

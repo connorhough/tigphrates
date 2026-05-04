@@ -1,5 +1,6 @@
 import { GameState, Position, LeaderColor, TileColor, BOARD_ROWS, BOARD_COLS } from './types'
 import { getNeighbors, findKingdoms } from './board'
+import { find2x2Square, getAvailableMonuments } from './monument'
 
 // Reusable BFS buffers for conflict flood-fills
 const _cVis = new Uint8Array(BOARD_ROWS * BOARD_COLS)
@@ -249,8 +250,14 @@ export function resolveWar(state: GameState): GameState {
 
   if (validPendingWars.length === 0) {
     state.pendingConflict = null
-    state.turnPhase = 'action'
-    state.actionsRemaining -= 1
+    const square = find2x2Square(state.board, unificationPos)
+    if (square && getAvailableMonuments(state.monuments, square.color).length > 0) {
+      state.pendingMonument = { position: square.topLeft, color: square.color }
+      state.turnPhase = 'monumentChoice'
+    } else {
+      state.turnPhase = 'action'
+      state.actionsRemaining -= 1
+    }
   } else if (validPendingWars.length === 1) {
     // Set up the next war directly
     setupWarConflict(state, validPendingWars[0], unificationPos, [])

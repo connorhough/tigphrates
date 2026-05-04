@@ -5,6 +5,13 @@ import { withdrawStrandedLeaders } from './conflict'
 /**
  * Check if placing a tile created a 2x2 same-color square.
  * Returns the top-left position and color, or null.
+ *
+ * If a placement completes multiple eligible 2x2 squares (e.g. a 3x3 block
+ * of one color), this function deterministically returns the first one in
+ * top-left-to-bottom-right order. GAME_RULES.md does not specify the
+ * tie-break for simultaneous monument arrangements; we pick the upper-left
+ * candidate by convention. The active player can decline to keep the
+ * choice they prefer (the other arrangement is then lost per the rules).
  */
 export function find2x2Square(board: Cell[][], position: Position): { topLeft: Position; color: TileColor } | null {
   const { row, col } = position

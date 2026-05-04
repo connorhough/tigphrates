@@ -1,6 +1,8 @@
+import { vi } from 'vitest'
 import { createGame } from '../setup'
 import { GameState } from '../types'
 import { endTurn, collectTreasures, checkGameEnd, calculateFinalScores } from '../turn'
+import * as monumentModule from '../monument'
 
 const STARTING_TEMPLES: [number, number][] = [
   [0,10],[1,1],[1,15],[2,5],[4,13],[6,9],[7,1],[8,14],[9,6],[10,10],
@@ -154,6 +156,24 @@ describe('turn flow', () => {
     const next = endTurn(state)
     expect(next.currentPlayer).toBe(0)
     expect(next.actionsRemaining).toBe(2)
+  })
+
+  it('draws tiles before monument scoring (rules-ordered end of turn)', () => {
+    const state = createGame(2)
+    state.players[0].hand = state.players[0].hand.slice(0, 4)
+    state.currentPlayer = 0
+    const bagBefore = state.bag.length
+
+    let bagLenAtMonumentScoring = -1
+    const spy = vi.spyOn(monumentModule, 'scoreMonuments').mockImplementation((s) => {
+      bagLenAtMonumentScoring = s.bag.length
+      return s
+    })
+
+    endTurn(state)
+
+    expect(bagLenAtMonumentScoring).toBe(bagBefore - 2)
+    spy.mockRestore()
   })
 
   it('sets gameOver when game should end', () => {
