@@ -41,6 +41,189 @@ ACTION_SPACE_SIZE = (
     + 1              # declineMonument
 )  # = 1728
 
+# --- Action-range constants (must match src/bridge/encoder.ts) -------------
+# Used by reward shaping to detect leader placements without round-tripping
+# through the bridge.
+PLACE_TILE_BASE = 0
+PLACE_TILE_END = 4 * _CELLS                  # 704 (exclusive)
+PLACE_LEADER_BASE = 4 * _CELLS               # 704
+PLACE_LEADER_END = 8 * _CELLS                # 1408 (exclusive)
+
+# Black leader is the king (color index 3 in src/bridge/encoder.ts COLOR_INDEX).
+# A placeLeader action's color is encoded as `base + color * _CELLS + cell`,
+# so any index whose `(rel // _CELLS) == 3` is a black-leader placement.
+BLACK_LEADER_COLOR = 3
+
+# buildMonument is action type 8 in the hierarchical layout (src/bridge/encoder.ts):
+#   placeTile(704) + placeLeader(704) + withdrawLeader(4) + placeCatastrophe(176)
+# + swapTiles(64) + pass(1) + commitSupport(64) + chooseWarOrder(4) = 1721 base,
+# 6 slots wide.
+BUILD_MONUMENT_BASE = 1721
+BUILD_MONUMENT_END = BUILD_MONUMENT_BASE + 6  # 1727 (exclusive)
+
+# --- Reward shaping helper -------------------------------------------------
+
+# Cap on how many leader-placement bonuses can be awarded per game. Prevents
+# the agent from farming the bonus by repeatedly withdrawing and re-placing.
+LEADER_PLACE_CAP = 4
+# Cap on monument-build awards per game (a player can build at most a handful
+# of monuments in a real game; the bonus is intentionally one-shot-ish).
+MONUMENT_BUILD_CAP = 2
+
+
+def _is_leader_placement(action_index: int) -> bool:
+    return PLACE_LEADER_BASE <= action_index < PLACE_LEADER_END
+
+
+def _leader_placement_color(action_index: int) -> int:
+    """Decode the leader color index (0=red,1=blue,2=green,3=black) from a
+    placeLeader action. Caller must already have verified `_is_leader_placement`."""
+    rel = action_index - PLACE_LEADER_BASE
+    return rel // _CELLS
+
+
+def _is_monument_build(action_index: int) -> bool:
+    return BUILD_MONUMENT_BASE <= action_index < BUILD_MONUMENT_END
+
+
+def _leader_placement_position(action_index: int) -> tuple[int, int]:
+    """Decode (row, col) from a placeLeader action index. Caller must already
+    have verified `_is_leader_placement`."""
+    rel = action_index - PLACE_LEADER_BASE
+    cell = rel % _CELLS
+    return cell // BOARD_COLS, cell % BOARD_COLS
+
+
+def _has_adjacent_tile(board: np.ndarray, row: int, col: int) -> bool:
+    """Return True if any of the 4 orthogonal neighbours of (row, col) holds
+    a tile of any color (channels 0-3 in the encoded board)."""
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        rr, cc = row + dr, col + dc
+        if 0 <= rr < BOARD_ROWS and 0 <= cc < BOARD_COLS:
+            if board[0:4, rr, cc].sum() > 0:
+                return True
+    return False
+
+
+def _treasures_from_obs(obs: dict) -> float:
+    """Read the active player's treasure count from an observation dict.
+    Treasures live at meta[0] (see TigphratesEnv._get_obs)."""
+    meta = obs.get("meta")
+    if meta is None:
+        return 0.0
+    try:
+        return float(meta[0])
+    except (IndexError, TypeError):
+        return 0.0
+
+
+def compute_event_shaping_bonus(
+    action_index: int,
+    prev_obs: dict,
+    next_obs: dict,
+    global_step: int,
+    leader_placements_so_far: int,
+    monument_builds_so_far: int,
+) -> float:
+    """Compute a dense per-event shaping reward.
+
+    Awards (subject to a single linear decay factor over SHAPING_DECAY_STEPS):
+      - Leader-placement bonus for any placeLeader action. Black (king) leaders
+        get KING_LEADER_BONUS instead of LEADER_PLACE_BONUS. Counts toward
+        LEADER_PLACE_CAP (4 awards / game).
+      - Kingdom-formation bonus when the placed leader is adjacent to a tile.
+      - Treasure-collect bonus when the active player's treasure count went up
+        from prev_obs to next_obs. Uncapped, one award per delta.
+      - Monument-build bonus when the action falls in the buildMonument slot
+        range. Capped at MONUMENT_BUILD_CAP awards / game.
+
+    Reads env vars at call time so test monkeypatching works.
+    """
+    place_bonus = float(os.environ.get("LEADER_PLACE_BONUS", "0.05"))
+    kingdom_bonus = float(os.environ.get("KINGDOM_FORM_BONUS", "0.1"))
+    king_bonus = float(os.environ.get("KING_LEADER_BONUS", "0.10"))
+    treasure_bonus = float(os.environ.get("TREASURE_COLLECT_BONUS", "0.15"))
+    monument_bonus = float(os.environ.get("MONUMENT_BUILD_BONUS", "0.10"))
+    decay_steps = int(os.environ.get("SHAPING_DECAY_STEPS", "200000"))
+
+    # Fast no-op short-circuit: when every bonus is zero, this is a no-op
+    # regardless of action / step. Guarantees byte-identical reward to the
+    # pre-shaping pipeline when production tunes all bonuses to zero.
+    if (place_bonus == 0.0 and kingdom_bonus == 0.0 and king_bonus == 0.0
+            and treasure_bonus == 0.0 and monument_bonus == 0.0):
+        return 0.0
+
+    # Linear decay factor. At global_step=0, factor=1; at decay_steps, factor=0.
+    if decay_steps <= 0:
+        decay_factor = 0.0
+    else:
+        decay_factor = max(0.0, 1.0 - global_step / decay_steps)
+
+    if decay_factor == 0.0:
+        return 0.0
+
+    bonus = 0.0
+
+    # --- Leader placement (capped) -----------------------------------------
+    if _is_leader_placement(action_index) and leader_placements_so_far < LEADER_PLACE_CAP:
+        color = _leader_placement_color(action_index)
+        # Black king gets the bumped bonus; other colors use the base.
+        if color == BLACK_LEADER_COLOR:
+            bonus += king_bonus
+        else:
+            bonus += place_bonus
+        # Kingdom-formation bonus: leader is now adjacent to at least one tile.
+        if kingdom_bonus > 0.0:
+            row, col = _leader_placement_position(action_index)
+            if _has_adjacent_tile(next_obs["board"], row, col):
+                bonus += kingdom_bonus
+
+    # --- Treasure collect (uncapped) ---------------------------------------
+    if treasure_bonus > 0.0:
+        prev_t = _treasures_from_obs(prev_obs)
+        next_t = _treasures_from_obs(next_obs)
+        delta = next_t - prev_t
+        if delta > 0.0:
+            bonus += treasure_bonus * delta
+
+    # --- Monument build (capped at MONUMENT_BUILD_CAP) ---------------------
+    if (monument_bonus > 0.0
+            and _is_monument_build(action_index)
+            and monument_builds_so_far < MONUMENT_BUILD_CAP):
+        bonus += monument_bonus
+
+    return bonus * decay_factor
+
+
+def compute_leader_shaping_bonus(
+    action_index: int,
+    prev_obs: dict,
+    next_obs: dict,
+    global_step: int,
+    leader_placements_so_far: int,
+) -> float:
+    """Backward-compatible alias for the original leader-only shaping helper.
+
+    Forwards to `compute_event_shaping_bonus` with `monument_builds_so_far=0`.
+    The treasure/monument/king bonuses default to zero only if the caller has
+    explicitly cleared the env vars; the new defaults (KING=0.10, TREASURE=0.15,
+    MONUMENT=0.10) are documented in compute_event_shaping_bonus and the
+    callers in train.py opt into the richer signature directly.
+
+    Existing test_shaping.py callers monkeypatch only the LEADER/KINGDOM env
+    vars and rely on the new bonuses being absent for non-treasure / non-monument
+    actions, which is naturally true: a leader placement with prev==next obs
+    triggers no treasure delta and is not in the monument range.
+    """
+    return compute_event_shaping_bonus(
+        action_index=action_index,
+        prev_obs=prev_obs,
+        next_obs=next_obs,
+        global_step=global_step,
+        leader_placements_so_far=leader_placements_so_far,
+        monument_builds_so_far=0,
+    )
+
 
 class BridgeProcess:
     """Manages the Node.js subprocess running the TS bridge server."""
