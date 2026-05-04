@@ -32,6 +32,9 @@ def evaluate_vs_heuristic(
     num_games: int = EVAL_GAMES,
     player_count: int = PLAYER_COUNT,
     max_turns: int = 2000,
+    mcts_simulations: int = 0,
+    mcts_model=None,
+    mcts_c_puct: float = 1.5,
 ) -> dict:
     """
     Evaluate a policy function against the built-in heuristic AI.
@@ -42,6 +45,12 @@ def evaluate_vs_heuristic(
         num_games: Number of games to play.
         player_count: Number of players (agent is always player 0).
         max_turns: Maximum turns before truncation.
+        mcts_simulations: If > 0, route the agent's action selection through
+            AlphaZero-style PUCT MCTS using `mcts_model` as the policy + value
+            evaluator. `policy_fn` is ignored in this mode.
+        mcts_model: PolicyValueNetwork instance used by MCTS (required when
+            `mcts_simulations > 0`).
+        mcts_c_puct: Exploration constant for PUCT.
 
     Returns:
         dict with keys: win_rate, avg_min_score, avg_margin, games_completed, results
@@ -52,6 +61,26 @@ def evaluate_vs_heuristic(
     margins = []
     results = []
 
+    mcts_picker = None
+    if mcts_simulations > 0:
+        if mcts_model is None:
+            raise ValueError("mcts_model is required when mcts_simulations > 0")
+        from mcts import MCTS, build_default_evaluator  # local import
+        evaluator = build_default_evaluator(mcts_model)
+
+        def _mcts_pick():
+            env._ensure_bridge()
+            mcts = MCTS(
+                model=evaluator,
+                bridge=env._bridge,
+                num_simulations=mcts_simulations,
+                c_puct=mcts_c_puct,
+            )
+            out = mcts.pick_action(game_id=env._game_id, player_index=env.agent_player)
+            return int(out["actionIndex"])
+
+        mcts_picker = _mcts_pick
+
     for g in range(num_games):
         obs, info = env.reset()
         terminated = False
@@ -61,7 +90,10 @@ def evaluate_vs_heuristic(
             mask = env.action_mask()
             if mask.sum() == 0:
                 break
-            action = policy_fn(obs, mask)
+            if mcts_picker is not None:
+                action = mcts_picker()
+            else:
+                action = policy_fn(obs, mask)
             obs, reward, terminated, truncated, info = env.step(action)
 
         # Extract final scores
@@ -114,6 +146,9 @@ def evaluate_vs_pool(
     games_per_opponent: int = 4,
     player_count: int = PLAYER_COUNT,
     max_turns: int = 2000,
+    mcts_simulations: int = 0,
+    mcts_model=None,
+    mcts_c_puct: float = 1.5,
 ) -> dict:
     """
     Evaluate a policy against every member of a checkpoint pool.
@@ -139,6 +174,14 @@ def evaluate_vs_pool(
             "total_games": 0,
         }
 
+    if mcts_simulations > 0 and mcts_model is None:
+        raise ValueError("mcts_model is required when mcts_simulations > 0")
+
+    mcts_evaluator = None
+    if mcts_simulations > 0:
+        from mcts import build_default_evaluator  # local import
+        mcts_evaluator = build_default_evaluator(mcts_model)
+
     total_wins = 0
     total_games = 0
     per_opponent: dict[str, float] = {}
@@ -162,6 +205,24 @@ def evaluate_vs_pool(
             opponent_policy=opp_policy_fn,
         )
         wins = 0
+
+        mcts_picker = None
+        if mcts_evaluator is not None:
+            from mcts import MCTS  # local import
+
+            def _mcts_pick():
+                env._ensure_bridge()
+                mcts = MCTS(
+                    model=mcts_evaluator,
+                    bridge=env._bridge,
+                    num_simulations=mcts_simulations,
+                    c_puct=mcts_c_puct,
+                )
+                out = mcts.pick_action(game_id=env._game_id, player_index=env.agent_player)
+                return int(out["actionIndex"])
+
+            mcts_picker = _mcts_pick
+
         for _ in range(games_per_opponent):
             obs, info = env.reset()
             terminated = False
@@ -170,7 +231,10 @@ def evaluate_vs_pool(
                 mask = env.action_mask()
                 if mask.sum() == 0:
                     break
-                action = policy_fn(obs, mask)
+                if mcts_picker is not None:
+                    action = mcts_picker()
+                else:
+                    action = policy_fn(obs, mask)
                 obs, reward, terminated, truncated, info = env.step(action)
             scores_info = info.get("scores")
             if scores_info:
@@ -299,6 +363,131 @@ def update_persistent_elo(
     table[ELO_AGENT_KEY] = agent_rating
     _save_elo_table(pool_dir, table)
     return table
+
+
+def evaluate_top1_match_vs_heuristic(
+    model,
+    num_games: int = 10,
+    num_decisions: int | None = None,
+    player_count: int = 2,
+    max_steps_per_game: int = 5000,
+    bridge=None,
+) -> dict:
+    """Heuristic-match top-1 accuracy.
+
+    Plays games where the heuristic AI chooses every move; at each
+    decision point we ask the model for its top-1 action under the same
+    legal-action mask and compare it to the heuristic's choice. This is
+    the BC convergence metric — AlphaGo's policy network reached 57%
+    top-1 match against KGS expert moves; >=50% is a sensible target
+    before handing off to RL.
+
+    Args:
+        model: PolicyValueNetwork (set to inference mode internally).
+        num_games: max games to play (early-exit if num_decisions reached).
+        num_decisions: optional cap on total decisions sampled across games.
+        player_count: number of players for game setup.
+        max_steps_per_game: safety cap on game length.
+        bridge: optional pre-built BridgeProcess (or stub) to drive games.
+            If None, opens a fresh BridgeProcess and closes it on exit.
+
+    Returns:
+        {"top1_acc": float, "n_decisions": int}
+    """
+    # Local imports avoid pulling torch / the bridge into evaluate.py's
+    # base public surface — this function is opt-in.
+    import torch  # noqa: F811
+    from imitation_pretrain import _ensure_batched_obs
+    from policy_server import _build_policy_obs
+    from train import TYPE_BASES_T
+    from tigphrates_env import BridgeProcess
+
+    owns_bridge = bridge is None
+    if bridge is None:
+        bridge = BridgeProcess()
+
+    was_training = getattr(model, "training", False)
+    if hasattr(model, "train"):
+        model.train(False)
+
+    matches = 0
+    n_decisions = 0
+    try:
+        for _g in range(num_games):
+            if num_decisions is not None and n_decisions >= num_decisions:
+                break
+            r = bridge.call("create", {"playerCount": player_count})
+            gid = r["gameId"]
+            safety = 0
+            try:
+                while safety < max_steps_per_game:
+                    safety += 1
+                    if num_decisions is not None and n_decisions >= num_decisions:
+                        break
+                    va = bridge.call("valid_actions", {"gameId": gid})
+                    if va["turnPhase"] == "gameOver":
+                        break
+                    active = va["activePlayer"]
+                    obs_raw = bridge.call("get_observation", {
+                        "gameId": gid, "playerIndex": active,
+                    })
+                    ai = bridge.call("ai_action", {"gameId": gid})
+                    expert_idx = int(ai.get("actionIndex", -1))
+                    if expert_idx < 0:
+                        break
+                    mask = np.array(va["mask"], dtype=np.int8)
+
+                    obs = _build_policy_obs(obs_raw)
+                    obs_batched = _stack_one(obs)
+                    obs_tensors = _ensure_batched_obs(obs_batched)
+                    type_logits, param_logits, _ = model.forward(obs_tensors)
+                    type_dist, param_padded, _ = model.hierarchical_dists(
+                        type_logits, param_logits, mask
+                    )
+                    type_idx = type_dist.logits.argmax(dim=-1)
+                    chosen_logits = param_padded[
+                        torch.arange(1, device=type_idx.device), type_idx
+                    ]
+                    param_idx = chosen_logits.argmax(dim=-1)
+                    pred_idx = int(
+                        (TYPE_BASES_T.to(type_idx.device)[type_idx] + param_idx).item()
+                    )
+
+                    if pred_idx == expert_idx:
+                        matches += 1
+                    n_decisions += 1
+
+                    # Step the heuristic's choice forward.
+                    bridge.call("step_action", {
+                        "gameId": gid,
+                        "action": ai["action"],
+                        "playerIndex": active,
+                    })
+            finally:
+                try:
+                    bridge.call("delete_game", {"gameId": gid})
+                except Exception:
+                    pass
+    finally:
+        if owns_bridge:
+            try:
+                bridge.close()
+            except Exception:
+                pass
+        if was_training and hasattr(model, "train"):
+            model.train(True)
+
+    top1 = matches / max(n_decisions, 1)
+    return {"top1_acc": float(top1), "n_decisions": int(n_decisions)}
+
+
+def _stack_one(obs: dict) -> dict:
+    """Add a leading batch dim of size 1 to each obs field."""
+    out = {}
+    for k, v in obs.items():
+        arr = np.asarray(v)
+        out[k] = arr[None, ...]
+    return out
 
 
 def evaluate_vs_random(

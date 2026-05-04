@@ -54,6 +54,7 @@ from train import PolicyValueNetwork, obs_to_tensors, DEVICE, _adapt_state_dict
 DEFAULT_PORT = 8765
 DEFAULT_MODEL_PATH = "models/policy_best.pt"
 DEFAULT_POOL_DIR = pathlib.Path("models/pool")
+DEFAULT_GAMES_DIR = pathlib.Path("models/games")
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG_TAIL = 400  # lines of train.py output retained per job
 
@@ -98,7 +99,7 @@ class PolicyServer:
     HTTP server. All bridge calls are serialized through a lock since the
     Node subprocess is a single stdin/stdout stream."""
 
-    def __init__(self, model_path: str, pool_dir: pathlib.Path):
+    def __init__(self, model_path: str, pool_dir: pathlib.Path, games_dir: pathlib.Path):
         self.bridge = BridgeProcess()
         self.model = PolicyValueNetwork()
         state_dict = torch.load(model_path, map_location="cpu")
@@ -108,6 +109,7 @@ class PolicyServer:
         self._lock = threading.Lock()
 
         self.pool_dir = pool_dir
+        self.games_dir = games_dir
         # Single concurrent training job at a time — Mac mini can't handle two
         # 4-env training runs simultaneously without thrashing.
         self._jobs: dict[str, dict] = {}
@@ -121,13 +123,36 @@ class PolicyServer:
             loaded = self.bridge.call("load_state", {"state": state})
             gid = loaded["gameId"]
             try:
-                obs_raw = self.bridge.call("get_observation", {
-                    "gameId": gid, "playerIndex": player_index,
-                })
                 va = self.bridge.call("valid_actions", {"gameId": gid})
                 mask = np.array(va["mask"], dtype=np.int8)
                 if mask.sum() == 0:
                     return {"action": {"type": "pass"}, "label": "pass", "actionIndex": -1}
+
+                # Optional AlphaZero-style MCTS at inference. Gated on
+                # MCTS_SIMULATIONS so the default behaviour (direct policy)
+                # is bit-identical for SIMULATIONS=0.
+                num_sims = int(os.environ.get("MCTS_SIMULATIONS", "0"))
+                if num_sims > 0:
+                    from mcts import MCTS, build_default_evaluator  # local import
+                    c_puct = float(os.environ.get("MCTS_C_PUCT", "1.5"))
+                    evaluator = build_default_evaluator(self.model)
+                    mcts = MCTS(
+                        model=evaluator,
+                        bridge=self.bridge,
+                        num_simulations=num_sims,
+                        c_puct=c_puct,
+                    )
+                    out = mcts.pick_action(game_id=gid, player_index=player_index)
+                    return {
+                        "action": out["action"],
+                        "label": out.get("label", ""),
+                        "actionIndex": int(out["actionIndex"]),
+                    }
+
+                # Direct-policy path (default, MCTS_SIMULATIONS=0).
+                obs_raw = self.bridge.call("get_observation", {
+                    "gameId": gid, "playerIndex": player_index,
+                })
                 obs = _build_policy_obs(obs_raw)
                 obs_t = obs_to_tensors(obs)
                 with torch.no_grad():
@@ -273,6 +298,25 @@ class PolicyServer:
                 "log": list(job["log"]),
             }
 
+    # --- Lab: game-log archive ---
+
+    def save_game_log(self, log_lines: list[str], meta: dict | None = None) -> dict:
+        """Persist a finished-game log to <games_dir>/<ts>-<id>.log and
+        update <games_dir>/latest.log. Returns {path, latest_path}."""
+        self.games_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+        gid = uuid.uuid4().hex[:6]
+        path = self.games_dir / f"{ts}-{gid}.log"
+        latest = self.games_dir / "latest.log"
+        body_lines: list[str] = []
+        if meta:
+            body_lines.append(f"# meta: {json.dumps(meta, sort_keys=True)}")
+        body_lines.extend(log_lines)
+        body = "\n".join(body_lines) + "\n"
+        path.write_text(body)
+        latest.write_text(body)
+        return {"path": str(path), "latest": str(latest)}
+
     def list_jobs(self) -> list[dict]:
         with self._job_lock:
             return [
@@ -362,6 +406,17 @@ def make_handler(server: PolicyServer):
                 except Exception as e:
                     return self._send_json(500, {"error": str(e)})
 
+            if self.path == "/games":
+                try:
+                    log = payload.get("log") or []
+                    if not isinstance(log, list) or not all(isinstance(s, str) for s in log):
+                        return self._send_json(400, {"error": "log must be a list[str]"})
+                    meta = payload.get("meta") or None
+                    res = server.save_game_log(log, meta)
+                    return self._send_json(200, res)
+                except Exception as e:
+                    return self._send_json(500, {"error": str(e)})
+
             if self.path == "/train":
                 try:
                     time_budget = int(payload.get("time_budget", 300))
@@ -389,6 +444,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL_PATH)
     parser.add_argument("--pool-dir", default=str(DEFAULT_POOL_DIR))
+    parser.add_argument("--games-dir", default=str(DEFAULT_GAMES_DIR),
+                        help="Directory where finished-game logs land (POST /games).")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default="0.0.0.0",
                         help="Bind interface. Default 0.0.0.0 so Tailscale / "
@@ -401,7 +458,9 @@ def main():
         sys.exit(2)
 
     print(f"Loading {args.model}...")
-    server = PolicyServer(args.model, pathlib.Path(args.pool_dir))
+    server = PolicyServer(
+        args.model, pathlib.Path(args.pool_dir), pathlib.Path(args.games_dir),
+    )
     httpd = HTTPServer((args.host, args.port), make_handler(server))
     print(f"Serving on http://{args.host}:{args.port}")
     print(f"  POST /action                 — pick action with default model")
@@ -409,6 +468,7 @@ def main():
     print(f"  GET  /pool/<name>.onnx       — lazily-exported per-snapshot ONNX")
     print(f"  POST /train                  — start a training run (time_budget seconds)")
     print(f"  GET  /train/<job_id>         — training status + log tail")
+    print(f"  POST /games                  — archive a finished game log to {args.games_dir}/")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

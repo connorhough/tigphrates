@@ -21,7 +21,13 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from tigphrates_env import TigphratesEnv, ACTION_SPACE_SIZE, BOARD_CHANNELS, BOARD_ROWS, BOARD_COLS
+from tigphrates_env import (
+    TigphratesEnv, ACTION_SPACE_SIZE, BOARD_CHANNELS, BOARD_ROWS, BOARD_COLS,
+    compute_leader_shaping_bonus,
+    compute_event_shaping_bonus,
+    _is_leader_placement as is_leader_placement_action,
+    _is_monument_build as is_monument_build_action,
+)
 from evaluate import (
     TIME_BUDGET,
     EVAL_GAMES,
@@ -57,9 +63,66 @@ SCORE_DELTA_COEF = float(os.environ.get("SCORE_DELTA_COEF", 1.5))
 SCORE_AVG_WEIGHT = float(os.environ.get("SCORE_AVG_WEIGHT", 0.5))
 MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 1.0))
 
+# Potential-based reward shaping (Ng, Harada, Russell 1999):
+#   F(s, s') = coef * (gamma * Phi(s') - Phi(s))
+# with Phi(s) = active-player min-color score. Policy-invariant by
+# construction: the optimal policy is unchanged regardless of coef, but
+# the dense intra-game signal accelerates learning of "raise your floor
+# color" — the dimension that defines the final score.
+#
+# When > 0, the legacy SCORE_DELTA_COEF * Δmin_score term is replaced by
+# this potential form (cleaner switch — they would otherwise double-count
+# the same signal). When = 0, falls back to the legacy shape exactly.
+POTENTIAL_GAMMA_SHAPING_COEF = float(os.environ.get("POTENTIAL_GAMMA_SHAPING_COEF", 1.0))
+
+
+def compute_potential_shaping(
+    min_score_prev: float,
+    min_score_next: float,
+    terminal: bool,
+    gamma: float,
+    coef: float,
+) -> float:
+    """Pure helper for potential-based shaping reward.
+
+    F(s, s') = coef * (gamma * Phi(s') - Phi(s))
+
+    At terminal steps, Phi(s') := 0 (absorbing-state convention from
+    Ng et al. 1999). This is *necessary* for policy invariance: it makes
+    the telescoping sum collapse to -Phi(s_0). A consequence is that
+    terminating with a high min-score yields a negative shaping reward
+    at the boundary; the raw terminal reward implicitly absorbs the
+    same magnitude in expectation.
+    """
+    if coef == 0.0:
+        return 0.0
+    phi_next = 0.0 if terminal else float(min_score_next)
+    phi_prev = float(min_score_prev)
+    return coef * (gamma * phi_next - phi_prev)
+
 # BC auxiliary (Phase 6.3)
 BC_COEF = float(os.environ.get("BC_COEF", 0.1))
 BC_QUERY_PROB = float(os.environ.get("BC_QUERY_PROB", 0.25))
+# When BC_AUX_DISABLED=1, effective_bc_coef() returns 0 — used after a
+# BC pretrain checkpoint is loaded via BC_INIT_CHECKPOINT, since the
+# auxiliary CE loss during PPO becomes redundant (and can pull the
+# policy off-distribution from its already-imitative starting point).
+BC_AUX_DISABLED = os.environ.get("BC_AUX_DISABLED", "0") == "1"
+# Optional path to a BC-pretrained checkpoint (state_dict). Loaded BEFORE
+# PPO begins, replacing the random init and the legacy policy_bc.pt path.
+BC_INIT_CHECKPOINT = os.environ.get("BC_INIT_CHECKPOINT", "").strip() or None
+
+
+def effective_bc_coef() -> float:
+    """BC auxiliary coefficient actually applied in the PPO loss.
+    Forced to 0 when BC_AUX_DISABLED=1 — this is the post-BC-pretrain
+    setup where the auxiliary loss is no longer needed."""
+    return 0.0 if BC_AUX_DISABLED else BC_COEF
+
+
+def bc_init_checkpoint_path() -> str | None:
+    """Path to the BC pretrain checkpoint, or None if unset."""
+    return BC_INIT_CHECKPOINT
 
 # V-trace replay buffer (Phase 11.2). On-policy PPO discards each rollout
 # after a single update; mixing in past rollouts with a truncated importance-
@@ -71,10 +134,34 @@ BC_QUERY_PROB = float(os.environ.get("BC_QUERY_PROB", 0.25))
 REPLAY_K = int(os.environ.get("REPLAY_K", 2))
 REPLAY_RHO_BAR = float(os.environ.get("REPLAY_RHO_BAR", 1.0))
 
-# Architecture (env-var overridable so a sweep can scale capacity)
-BOARD_CONV_CHANNELS = int(os.environ.get("BOARD_CONV_CHANNELS", 32))
+# Architecture (env-var overridable so a sweep can scale capacity).
+# Phase 12 upgrade: AlphaZero-style residual conv tower + spatial heads.
+# - BOARD_CONV_CHANNELS: width of every conv layer in the trunk. 64 gives
+#   enough capacity for kingdom-level reasoning without blowing up step time.
+# - RES_BLOCKS: depth of the residual tower. Each block has receptive-field
+#   reach +2 cells (two 3x3 convs); 6 blocks reaches the full 11x16 board.
+# - HIDDEN_DIM / NUM_HIDDEN_LAYERS: shared trunk after pooling for the type
+#   head, value head, and non-spatial param slots.
+BOARD_CONV_CHANNELS = int(os.environ.get("BOARD_CONV_CHANNELS", 64))
+RES_BLOCKS = int(os.environ.get("RES_BLOCKS", 6))
 HIDDEN_DIM = int(os.environ.get("HIDDEN_DIM", 256))
 NUM_HIDDEN_LAYERS = int(os.environ.get("NUM_HIDDEN_LAYERS", 2))
+
+# Optional LSTM core (off by default). Tigris & Euphrates has hidden info
+# (opponent hand composition) that a feedforward net cannot model across
+# turns; an LSTM after the conv tower can carry that belief state. Default
+# OFF so the running BC pretrain's checkpoint loads cleanly into the
+# unchanged feedforward path; flip USE_LSTM_CORE=1 to enable.
+#
+# When enabled, an nn.LSTM(trunk_input_dim -> LSTM_HIDDEN) sits between the
+# pooled conv features and the trunk MLP. Spatial heads (placeTile,
+# placeLeader, placeCatastrophe) still come straight off the conv map -
+# the LSTM only feeds the type_head, value_head, and nonspatial_head. The
+# forward signature also gains an optional hidden_state kwarg and returns a
+# 4-tuple including the new hidden state; the no-LSTM path keeps the
+# existing 3-tuple signature unchanged.
+USE_LSTM_CORE = os.environ.get("USE_LSTM_CORE", "0") == "1"
+LSTM_HIDDEN = int(os.environ.get("LSTM_HIDDEN", 256))
 
 # Compute device. Apple Silicon Mac minis have a Metal GPU exposed via the
 # MPS backend — picks up a 3-5× speedup on inference + training over CPU.
@@ -106,9 +193,14 @@ TRAIN_VS_HEURISTIC_PROB = float(os.environ.get("TRAIN_VS_HEURISTIC_PROB", 0.25))
 # early rollouts are dominated by a stable opponent (heuristic) and later
 # rollouts shift toward self-play / league. Smoother early learning when the
 # pool would otherwise be full of weak random snapshots.
-CURRICULUM_ENABLED = os.environ.get("CURRICULUM_ENABLED", "0") == "1"
-CURRICULUM_HEURISTIC_START = float(os.environ.get("CURRICULUM_HEURISTIC_START", 1.0))
-CURRICULUM_HEURISTIC_END = float(os.environ.get("CURRICULUM_HEURISTIC_END", 0.1))
+CURRICULUM_ENABLED = os.environ.get("CURRICULUM_ENABLED", "1") == "1"
+# Less aggressive than the original 1.0 → 0.1. Starting at 0.9 keeps a small
+# share of self-play / pool opponents in the first rollouts (so the policy
+# does not overfit to heuristic quirks); ending at 0.3 keeps a meaningful
+# heuristic anchor late so the pool's noise can't fully dominate. These are
+# the recommended defaults after the leader-placement bottleneck fix.
+CURRICULUM_HEURISTIC_START = float(os.environ.get("CURRICULUM_HEURISTIC_START", 0.9))
+CURRICULUM_HEURISTIC_END = float(os.environ.get("CURRICULUM_HEURISTIC_END", 0.3))
 
 # League scheduler granularity. "per_episode" picks a fresh opponent for an
 # env when its episode resets, so a single rollout exposes the policy to
@@ -262,74 +354,191 @@ def _adapt_state_dict(state_dict: dict) -> dict:
 # Policy Network
 # ---------------------------------------------------------------------------
 
-class BoardEncoder(nn.Module):
-    """CNN encoder for the 13-channel 11x16 board tensor."""
-    def __init__(self, in_channels=BOARD_CHANNELS, out_channels=BOARD_CONV_CHANNELS):
+class ResidualBlock(nn.Module):
+    """Standard AlphaZero residual block: Conv -> BN -> ReLU -> Conv -> BN
+    -> add skip -> ReLU. The convs preserve spatial resolution (stride 1,
+    padding 1, 3x3 kernel) so we can stack them without downsampling the
+    11x16 board."""
+
+    def __init__(self, channels: int):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.out_dim = out_channels * BOARD_ROWS * BOARD_COLS
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
-        # x: (B, C, H, W)
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        return x.view(x.size(0), -1)  # flatten
+        identity = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = out + identity
+        return F.relu(out)
+
+
+class BoardEncoder(nn.Module):
+    """Residual conv tower for the 15-channel 11x16 board tensor.
+
+    forward_features(x) -> (B, C, 11, 16) is the spatial map consumed by the
+    spatial heads (placeTile, placeLeader, placeCatastrophe).
+    forward(x) keeps the older flat-vector signature for compatibility.
+
+    Tower depth controlled by RES_BLOCKS (env var, default 6). With a 3x3
+    kernel and 6 blocks (12 conv layers + 1 stem), the receptive field is
+    25x25 — comfortably bigger than the 11x16 board, so kingdoms and river
+    paths can influence per-cell logits anywhere on the map.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = BOARD_CHANNELS,
+        out_channels: int = BOARD_CONV_CHANNELS,
+        num_blocks: int = RES_BLOCKS,
+    ):
+        super().__init__()
+        # Stem: project input channels to the trunk width.
+        self.stem_conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.stem_bn = nn.BatchNorm2d(out_channels)
+        # Residual tower. ModuleList so tests can introspect `len(res_blocks)`.
+        self.res_blocks = nn.ModuleList(
+            [ResidualBlock(out_channels) for _ in range(num_blocks)]
+        )
+        self.channels = out_channels
+        self.out_dim = out_channels * BOARD_ROWS * BOARD_COLS
+
+    def forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.relu(self.stem_bn(self.stem_conv(x)))
+        for block in self.res_blocks:
+            x = block(x)
+        return x
+
+    def forward(self, x):
+        feat = self.forward_features(x)
+        return feat.view(feat.size(0), -1)
 
 
 class PolicyValueNetwork(nn.Module):
-    """Actor-critic network with CNN board encoder + MLP head."""
+    """Actor-critic with a residual conv tower + spatial conv heads.
+
+    Spatial action types (placeTile, placeLeader, placeCatastrophe) read
+    per-cell logits directly from a 1x1 conv on the encoder's spatial map,
+    which gives the policy strong inductive bias on this 11x16 board: a
+    placeTile logit at cell (r,c) depends primarily on the encoder's local
+    receptive field around (r,c), not a flat 1728-way linear that has to
+    learn cell identity from scratch.
+
+    Non-spatial action types (withdrawLeader, swapTiles, pass, commitSupport,
+    chooseWarOrder, buildMonument, declineMonument) get logits from a small
+    MLP on the pooled trunk; their slot count is small (144 total).
+
+    The hierarchical (type, param) sampling interface in get_action_and_value
+    is unchanged — only the structure of param_logits is.
+    """
+
     def __init__(self):
         super().__init__()
         self.board_encoder = BoardEncoder()
+        C = self.board_encoder.channels
 
-        # Hand_seq is 6 slots × 5-way one-hot (4 colors + empty) = 30 features.
-        # Lets the policy reason about WHICH tile sits at each hand position so
-        # position-indexed swap actions (server.ts BASE_SWAP) carry meaningful
-        # signal instead of being effectively random over a count vector.
-        # Extra features: hand(4) + hand_seq(30) + scores(4) + meta(8) +
-        # conflict(7) + leaders(8) + opp_scores(4) + opp_leaders(8) = 73
+        # Extras: hand(4) + hand_seq(30) + scores(4) + meta(8) + conflict(7)
+        #       + leaders(8) + opp_scores(4) + opp_leaders(8) = 73
         extra_dim = 4 + 30 + 4 + 8 + 7 + 8 + 4 + 8
-        trunk_input_dim = self.board_encoder.out_dim + extra_dim
+        # Pool the spatial map (global average pool) before concat with extras
+        # for the type / value / nonspatial heads. Keeps the trunk dim O(C),
+        # not O(C*H*W), so the heads stay small even with a wider tower.
+        trunk_input_dim = C + extra_dim
 
-        # Shared trunk
+        # Optional recurrent core. When USE_LSTM_CORE=0 (default), self.lstm
+        # is None and the trunk MLP consumes the (pooled-feat + extras) vector
+        # directly - identical to the pre-LSTM architecture, so the BC
+        # pretrain checkpoint's state_dict loads cleanly. When enabled, the
+        # LSTM consumes (B, T, trunk_input_dim) and emits (B, T, LSTM_HIDDEN)
+        # which then feeds the trunk; spatial heads bypass the LSTM and read
+        # the raw conv map.
+        self.use_lstm = USE_LSTM_CORE
+        self.lstm_hidden = LSTM_HIDDEN if self.use_lstm else 0
+        if self.use_lstm:
+            self.lstm = nn.LSTM(
+                input_size=trunk_input_dim,
+                hidden_size=LSTM_HIDDEN,
+                num_layers=1,
+                batch_first=True,
+            )
+            trunk_in_dim = LSTM_HIDDEN
+        else:
+            self.lstm = None
+            trunk_in_dim = trunk_input_dim
+
         layers = []
-        in_dim = trunk_input_dim
+        in_dim = trunk_in_dim
         for _ in range(NUM_HIDDEN_LAYERS):
             layers.append(nn.Linear(in_dim, HIDDEN_DIM))
             layers.append(nn.ReLU())
             in_dim = HIDDEN_DIM
         self.trunk = nn.Sequential(*layers)
 
-        # Hierarchical policy heads.
-        # type_head:  HIDDEN_DIM -> NUM_ACTION_TYPES (10).
-        # param_head: HIDDEN_DIM -> ACTION_SPACE_SIZE (1728).
-        # The param head's output is partitioned by type slot range; given a
-        # sampled type t, only the slice [TYPE_BASES[t]:TYPE_BASES[t]+sizes[t]]
-        # is consulted. Same total parameter count as the previous flat head;
-        # the win comes from masked-down per-head distributions.
+        # Type-level head.
         self.type_head = nn.Linear(HIDDEN_DIM, NUM_ACTION_TYPES)
-        self.param_head = nn.Linear(HIDDEN_DIM, ACTION_SPACE_SIZE)
 
-        # Value head
+        # Spatial heads. 1x1 convs straight from the encoder feature map.
+        self.place_tile_head = nn.Conv2d(C, 4, kernel_size=1)
+        self.place_leader_head = nn.Conv2d(C, 4, kernel_size=1)
+        self.place_catastrophe_head = nn.Conv2d(C, 1, kernel_size=1)
+
+        # Non-spatial param head: outputs concatenated logits for the seven
+        # non-spatial action types in TYPE_BASES order:
+        #   withdrawLeader (4) + swapTiles (64) + pass (1) + commitSupport (64)
+        #   + chooseWarOrder (4) + buildMonument (6) + declineMonument (1) = 144
+        nonspatial_total = (
+            TYPE_PARAM_SIZES[2] + TYPE_PARAM_SIZES[4] + TYPE_PARAM_SIZES[5]
+            + TYPE_PARAM_SIZES[6] + TYPE_PARAM_SIZES[7] + TYPE_PARAM_SIZES[8]
+            + TYPE_PARAM_SIZES[9]
+        )
+        self.nonspatial_head = nn.Linear(HIDDEN_DIM, nonspatial_total)
+        self._nonspatial_total = nonspatial_total
+
+        # Value head.
         self.value_head = nn.Linear(HIDDEN_DIM, 1)
 
-        # Initialize
         self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, (nn.Linear, nn.Conv2d)):
                 nn.init.orthogonal_(m.weight, gain=math.sqrt(2))
-                if m.bias is not None:
+                if getattr(m, "bias", None) is not None:
                     nn.init.zeros_(m.bias)
-        # Small init for both policy heads and the value output.
+            elif isinstance(m, nn.BatchNorm2d):
+                # Identity init: weight=1, bias=0 — keeps the residual
+                # connection close to identity at the start of training.
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+        # Small init on the policy heads keeps the initial action distribution
+        # close to uniform after softmax.
         nn.init.orthogonal_(self.type_head.weight, gain=0.01)
-        nn.init.orthogonal_(self.param_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.place_tile_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.place_leader_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.place_catastrophe_head.weight, gain=0.01)
+        nn.init.orthogonal_(self.nonspatial_head.weight, gain=0.01)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
 
-    def forward(self, obs):
-        board = obs["board"]           # (B, 15, 11, 16)
+    def forward(self, obs, hidden_state=None):
+        """Forward pass.
+
+        When self.use_lstm is False (default), returns the legacy 3-tuple
+        (type_logits, param_logits, value) and the `hidden_state` kwarg is
+        ignored - this keeps the no-LSTM code path byte-identical to the
+        pre-LSTM architecture so the BC pretrain checkpoint loads cleanly.
+
+        When self.use_lstm is True, the pooled-feat+extras vector is fed
+        through a single-step LSTM (T=1) before reaching the trunk MLP,
+        and the forward returns a 4-tuple (..., new_hidden_state) where
+        new_hidden_state is the LSTM's (h, c) output. Spatial heads still
+        read the raw conv map directly - only type/value/nonspatial heads
+        consume the LSTM output. Pass hidden_state to carry belief state
+        across consecutive single-step calls; pass None for a fresh start
+        (zeros).
+        """
+        board = obs["board"]           # (B, BOARD_CHANNELS, 11, 16)
         hand = obs["hand"]             # (B, 4)
         hand_seq = obs["hand_seq"]     # (B, 6) ints in {-1, 0, 1, 2, 3}
         scores = obs["scores"]         # (B, 4)
@@ -339,20 +548,76 @@ class PolicyValueNetwork(nn.Module):
         opp_scores = obs["opp_scores"] # (B, 4)
         opp_leaders = obs["opp_leaders"] # (B, 8)
 
-        # One-hot hand_seq: shape (B, 6, 5) → flatten to (B, 30). Slot 4 = empty.
-        # Map -1 → 4, then one_hot. Cast to int64 first since one_hot needs long.
         idx = hand_seq.to(torch.int64)
         idx = torch.where(idx < 0, torch.full_like(idx, 4), idx)
         hand_seq_oh = F.one_hot(idx, num_classes=5).to(torch.float32).reshape(idx.size(0), -1)
 
-        board_features = self.board_encoder(board)
-        extra = torch.cat([hand, hand_seq_oh, scores, meta, conflict, leaders, opp_scores, opp_leaders], dim=-1)
-        combined = torch.cat([board_features, extra], dim=-1)
+        # Spatial feature map: (B, C, H, W).
+        feat = self.board_encoder.forward_features(board)
+        B = feat.shape[0]
 
-        trunk_out = self.trunk(combined)
+        # Pool to (B, C) for the trunk.
+        pooled = feat.mean(dim=(2, 3))
+        extra = torch.cat(
+            [hand, hand_seq_oh, scores, meta, conflict, leaders, opp_scores, opp_leaders],
+            dim=-1,
+        )
+        trunk_in = torch.cat([pooled, extra], dim=-1)
+
+        new_hidden_state = None
+        if self.use_lstm:
+            # Single-step inference path: insert a length-1 time dim, run the
+            # LSTM, then squeeze it back out. The hidden state is carried
+            # forward by the caller across consecutive forward calls.
+            lstm_in = trunk_in.unsqueeze(1)  # (B, 1, F)
+            lstm_out, new_hidden_state = self.lstm(lstm_in, hidden_state)
+            trunk_in = lstm_out.squeeze(1)   # (B, LSTM_HIDDEN)
+
+        trunk_out = self.trunk(trunk_in)
+
         type_logits = self.type_head(trunk_out)
-        param_logits = self.param_head(trunk_out)
         value = self.value_head(trunk_out).squeeze(-1)
+
+        # Spatial heads. Reshape (B, ci, r, c) -> (B, ci*r*c) walks ci, r, c
+        # in row-major order, exactly matching `param = ci*(R*C) + r*C + c`.
+        R, C_ = BOARD_ROWS, BOARD_COLS
+        place_tile_spatial = self.place_tile_head(feat)        # (B, 4, R, C)
+        place_leader_spatial = self.place_leader_head(feat)    # (B, 4, R, C)
+        place_cata_spatial = self.place_catastrophe_head(feat) # (B, 1, R, C)
+
+        place_tile_flat = place_tile_spatial.reshape(B, 4 * R * C_)
+        place_leader_flat = place_leader_spatial.reshape(B, 4 * R * C_)
+        place_cata_flat = place_cata_spatial.reshape(B, R * C_)
+
+        # Non-spatial logits: split the concatenated nonspatial head output
+        # into the per-type slices in TYPE_BASES order.
+        nonspatial = self.nonspatial_head(trunk_out)  # (B, 144)
+        ns_slices = {}
+        acc = 0
+        for t in (2, 4, 5, 6, 7, 8, 9):
+            sz = TYPE_PARAM_SIZES[t]
+            ns_slices[t] = nonspatial[:, acc:acc + sz]
+            acc += sz
+
+        # Concatenate in flat-action order. Single torch.cat — autograd-clean
+        # and ONNX-traceable.
+        param_logits = torch.cat(
+            [
+                place_tile_flat,    # type 0 placeTile (704)
+                place_leader_flat,  # type 1 placeLeader (704)
+                ns_slices[2],       # type 2 withdrawLeader (4)
+                place_cata_flat,    # type 3 placeCatastrophe (176)
+                ns_slices[4],       # type 4 swapTiles (64)
+                ns_slices[5],       # type 5 pass (1)
+                ns_slices[6],       # type 6 commitSupport (64)
+                ns_slices[7],       # type 7 chooseWarOrder (4)
+                ns_slices[8],       # type 8 buildMonument (6)
+                ns_slices[9],       # type 9 declineMonument (1)
+            ],
+            dim=-1,
+        )
+        if self.use_lstm:
+            return type_logits, param_logits, value, new_hidden_state
         return type_logits, param_logits, value
 
     def hierarchical_dists(self, type_logits, param_logits, flat_mask):
@@ -386,7 +651,16 @@ class PolicyValueNetwork(nn.Module):
         return type_dist, param_logits_padded, type_mask
 
     def get_action_and_value(self, obs, action_mask, action=None):
-        type_logits, param_logits, value = self.forward(obs)
+        # The LSTM-enabled forward returns a 4-tuple; callers of
+        # get_action_and_value have not been updated to thread hidden state
+        # yet (deferred to a follow-up that touches policy_server / evaluate
+        # / mcts). For now we drop the new_hidden_state silently so a stray
+        # USE_LSTM_CORE=1 doesn't crash the PPO update path - it just runs
+        # the LSTM with a zero hidden state every call (effectively
+        # feedforward). When the propagation work lands, this will switch
+        # to plumbing hidden_state through.
+        out = self.forward(obs)
+        type_logits, param_logits, value = out[0], out[1], out[2]
         type_dist, param_logits_padded, _type_mask = self.hierarchical_dists(
             type_logits, param_logits, action_mask
         )
@@ -521,6 +795,7 @@ def collect_rollout_vec(
     model,
     rollout_steps: int,
     on_reset=None,
+    global_step: int = 0,
 ):
     """Vectorized rollout. Splits rollout_steps across env_vec.n envs; total
     transitions == rollout_steps. Single batched forward pass per outer step
@@ -543,6 +818,12 @@ def collect_rollout_vec(
     episode_rewards: list[float] = []
     current_ep_rewards = [0.0] * n
     steps_collected = 0
+    # Per-env leader-placement counters for shaping bonus cap. Reset on episode
+    # boundary so the cap applies per-game.
+    leader_placements: list[int] = [0] * n
+    # Per-env monument-build counters for the monument bonus cap. Same reset
+    # semantics as leader_placements.
+    monument_builds: list[int] = [0] * n
 
     obs_per_env: list[dict] = [None] * n
     reset_results = env_vec.reset_all()
@@ -627,7 +908,44 @@ def collect_rollout_vec(
             avg_delta = new_avg - prev_avg
             blended = (1.0 - SCORE_AVG_WEIGHT) * min_delta + SCORE_AVG_WEIGHT * avg_delta
             margin_delta = new_margin - prev_margin
-            shaped = reward + SCORE_DELTA_COEF * blended + MARGIN_DELTA_COEF * margin_delta
+
+            # Potential-based shaping (Ng et al. 1999) replaces the legacy
+            # SCORE_DELTA_COEF * Δmin_score term when its coef is > 0. The
+            # two are alternative encodings of "raise your floor color";
+            # using both would double-count. Margin term is left intact.
+            if POTENTIAL_GAMMA_SHAPING_COEF > 0.0:
+                potential_shape = compute_potential_shaping(
+                    min_score_prev=prev_min,
+                    min_score_next=new_min,
+                    terminal=bool(done),
+                    gamma=GAMMA,
+                    coef=POTENTIAL_GAMMA_SHAPING_COEF,
+                )
+                shaped = reward + potential_shape + MARGIN_DELTA_COEF * margin_delta
+            else:
+                shaped = reward + SCORE_DELTA_COEF * blended + MARGIN_DELTA_COEF * margin_delta
+
+            # Per-event shaping (leader/king/kingdom + treasure + monument).
+            # Single combined helper; bumps leader/monument counters only when
+            # the corresponding event actually fired so the per-game caps stay
+            # honest. Decays to zero over SHAPING_DECAY_STEPS.
+            shaping = compute_event_shaping_bonus(
+                action_index=actions_list[i],
+                prev_obs=obs_per_env[i],
+                next_obs=obs_new,
+                global_step=global_step + steps_collected,
+                leader_placements_so_far=leader_placements[i],
+                monument_builds_so_far=monument_builds[i],
+            )
+            if shaping > 0.0:
+                shaped += shaping
+                # Only count caps if this action was actually the gated event.
+                if (is_leader_placement_action(actions_list[i])
+                        and leader_placements[i] < 4):
+                    leader_placements[i] += 1
+                if (is_monument_build_action(actions_list[i])
+                        and monument_builds[i] < 2):
+                    monument_builds[i] += 1
 
             per_env_rewards[i].append(shaped)
             per_env_dones[i].append(float(done))
@@ -637,6 +955,8 @@ def collect_rollout_vec(
             if done:
                 episode_rewards.append(current_ep_rewards[i])
                 current_ep_rewards[i] = 0.0
+                leader_placements[i] = 0  # reset per-game cap
+                monument_builds[i] = 0    # reset per-game cap
                 obs_new, _ = env_vec.envs[i].reset()
                 if on_reset is not None:
                     on_reset(i)
@@ -769,7 +1089,21 @@ def collect_rollout(env, model, rollout_steps):
         min_delta = new_min_score - prev_min_score
         avg_delta = new_avg_score - prev_avg_score
         blended_delta = (1.0 - SCORE_AVG_WEIGHT) * min_delta + SCORE_AVG_WEIGHT * avg_delta
-        reward = reward + SCORE_DELTA_COEF * blended_delta
+
+        # Potential-based shaping (Ng et al. 1999) replaces the legacy
+        # SCORE_DELTA_COEF * Δmin_score term when its coef is > 0. The
+        # two are alternative encodings of "raise your floor color";
+        # using both would double-count.
+        if POTENTIAL_GAMMA_SHAPING_COEF > 0.0:
+            reward = reward + compute_potential_shaping(
+                min_score_prev=prev_min_score,
+                min_score_next=new_min_score,
+                terminal=bool(done),
+                gamma=GAMMA,
+                coef=POTENTIAL_GAMMA_SHAPING_COEF,
+            )
+        else:
+            reward = reward + SCORE_DELTA_COEF * blended_delta
 
         # Margin-based reward: relative score improvement vs opponent
         new_opp_min = float(np.min(obs["opp_scores"][:4]))
@@ -999,7 +1333,7 @@ def ppo_update(model, optimizer, rollout):
                 pg_loss
                 + VALUE_COEF * vf_loss
                 - ENTROPY_COEF * entropy
-                + BC_COEF * bc_loss
+                + effective_bc_coef() * bc_loss
             )
 
             optimizer.zero_grad()
@@ -1071,6 +1405,35 @@ def load_policy_from_path(path: str) -> nn.Module:
     m.load_state_dict(_adapt_state_dict(raw), strict=False)
     m.train(False)
     m.to(DEVICE)
+    return m
+
+
+def build_policy(load_path: str | None) -> nn.Module:
+    """Construct a PolicyValueNetwork, optionally loading weights from a
+    BC pretrain checkpoint.
+
+    - load_path is None: random init (existing behavior).
+    - load_path exists: load state_dict (with `_adapt_state_dict` for
+      pre-Phase-11.1 compatibility).
+    - load_path doesn't exist: print a warning and fall back to random
+      init so a missing checkpoint doesn't silently break a training run.
+
+    Used by main() at startup. Factored out so unit tests can verify the
+    init path without booting the full training loop.
+    """
+    m = PolicyValueNetwork()
+    if load_path is None:
+        return m
+    p = pathlib.Path(load_path)
+    if not p.exists():
+        print(f"build_policy: checkpoint not found at {p}; using random init",
+              file=sys.stderr)
+        return m
+    raw = torch.load(p, map_location="cpu")
+    if isinstance(raw, dict) and "model_state" in raw:
+        raw = raw["model_state"]
+    m.load_state_dict(_adapt_state_dict(raw), strict=False)
+    print(f"build_policy: loaded BC init from {p}")
     return m
 
 
@@ -1150,14 +1513,33 @@ if __name__ == "__main__":
             print(f"RESUME_FROM={resume_path} not found; starting fresh")
 
     if not resumed:
-        bc_path = RUN_DIR / "policy_bc.pt"
-        if bc_path.exists():
-            try:
-                raw = torch.load(bc_path, map_location="cpu")
-                model.load_state_dict(_adapt_state_dict(raw), strict=False)
-                print(f"Loaded BC warm start from {bc_path}")
-            except Exception as e:
-                print(f"Failed to load BC warm start ({e}); starting from random init")
+        # Priority: BC_INIT_CHECKPOINT (new BC pretrain stage) →
+        # legacy <RUN_DIR>/policy_bc.pt → random init.
+        bc_init = bc_init_checkpoint_path()
+        if bc_init:
+            init_path = pathlib.Path(bc_init)
+            if init_path.exists():
+                try:
+                    raw = torch.load(init_path, map_location="cpu")
+                    if isinstance(raw, dict) and "model_state" in raw:
+                        raw = raw["model_state"]
+                    model.load_state_dict(_adapt_state_dict(raw), strict=False)
+                    print(f"Loaded BC pretrain from {init_path} (BC_INIT_CHECKPOINT)")
+                except Exception as e:
+                    print(f"Failed to load BC_INIT_CHECKPOINT ({e}); starting from random init")
+            else:
+                print(f"BC_INIT_CHECKPOINT={init_path} not found; falling back to legacy path")
+        else:
+            bc_path = RUN_DIR / "policy_bc.pt"
+            if bc_path.exists():
+                try:
+                    raw = torch.load(bc_path, map_location="cpu")
+                    model.load_state_dict(_adapt_state_dict(raw), strict=False)
+                    print(f"Loaded BC warm start from {bc_path}")
+                except Exception as e:
+                    print(f"Failed to load BC warm start ({e}); starting from random init")
+        if BC_AUX_DISABLED:
+            print(f"BC_AUX_DISABLED=1 → effective BC_COEF forced to 0 in PPO loss")
     model.to(DEVICE)
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {num_params:,}")
@@ -1177,11 +1559,28 @@ if __name__ == "__main__":
         opponent_policy=None,
     )
 
-    # Seed pool with the initial random policy so early rollouts have a non-
-    # heuristic opponent to learn against. Subsequent snapshots get added
-    # whenever a rollout finishes (capped at POOL_MAX_SIZE).
+    # Seed pool with the initial policy so early rollouts have a non-heuristic
+    # opponent to learn against. Subsequent snapshots get added whenever a
+    # rollout finishes (capped at POOL_MAX_SIZE).
+    #
+    # FRESH_INIT_CHECKPOINT env var, if set to an existing path, is preferred
+    # over the in-memory model. Lets the pool reset workflow (`python
+    # reset_pool.py --init-checkpoint <path>`) seed a known-good random init
+    # without having to re-run BC pretraining first.
     if not list_pool():
-        add_to_pool(model, label="init")
+        fresh_init = os.environ.get("FRESH_INIT_CHECKPOINT")
+        if fresh_init and pathlib.Path(fresh_init).exists():
+            _ensure_pool_dir()
+            init_path = POOL_DIR / "policy_init.pt"
+            try:
+                import shutil as _shutil
+                _shutil.copyfile(fresh_init, init_path)
+                print(f"Seeded pool init from {fresh_init} -> {init_path}")
+            except OSError as e:
+                print(f"Failed to copy FRESH_INIT_CHECKPOINT ({e}); seeding from in-memory model")
+                add_to_pool(model, label="init")
+        else:
+            add_to_pool(model, label="init")
 
     # Training loop
     total_training_time = 0.0
@@ -1222,7 +1621,11 @@ if __name__ == "__main__":
             env_vec.set_opponent_policy(opp_policy)
             on_reset_cb = None
 
-        rollout = collect_rollout_vec(env_vec, model, ROLLOUT_STEPS, on_reset=on_reset_cb)
+        rollout = collect_rollout_vec(
+            env_vec, model, ROLLOUT_STEPS,
+            on_reset=on_reset_cb,
+            global_step=total_steps,
+        )
         total_steps += rollout["steps"]
         total_episodes += len(rollout["episode_rewards"])
         all_episode_rewards.extend(rollout["episode_rewards"])
