@@ -118,6 +118,10 @@ run_expert_agent() {
   local traces_dir="traces/${commit}"
   local critique="${traces_dir}/critique.md"
   local shaping="models/shaping_config.json"
+  if [[ ! -f "$shaping" ]]; then
+    echo ">>> Skipping expert agent: $shaping missing (train.py likely crashed before save)." >&2
+    return 1
+  fi
   local num_games
   num_games=$(ls "$traces_dir"/game_*.jsonl 2>/dev/null | wc -l | tr -d ' ')
   [[ "$num_games" -eq 0 ]] && return 1
@@ -160,8 +164,13 @@ run_ds_agent() {
 prune_traces() {
   local keep="${TRACE_RETENTION:-10}"
   if [[ ! -d traces ]]; then return 0; fi
-  local dirs
-  mapfile -t dirs < <(ls -1dt traces/*/ 2>/dev/null || true)
+  # bash 3.2 compatible: avoid mapfile (bash 4+). Build the array via a
+  # while-read loop with NUL-safe separators.
+  local dirs=()
+  local d
+  while IFS= read -r d; do
+    [[ -n "$d" ]] && dirs+=("$d")
+  done < <(ls -1dt traces/*/ 2>/dev/null || true)
   local n="${#dirs[@]}"
   if (( n <= keep )); then return 0; fi
   local i
