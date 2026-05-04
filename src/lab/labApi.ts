@@ -62,3 +62,20 @@ export async function fetchJob(jobId: string, base: string = LAB_BASE_URL): Prom
   if (!r.ok) throw new Error(`job ${r.status}`)
   return r.json()
 }
+
+export async function postGameLog(
+  log: string[],
+  meta: Record<string, unknown> = {},
+  base: string = LAB_BASE_URL,
+): Promise<{ path: string; latest: string }> {
+  const r = await fetch(`${base}/games`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ log, meta }),
+  })
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({ error: r.statusText }))
+    throw new Error(body.error || `games ${r.status}`)
+  }
+  return r.json()
+}

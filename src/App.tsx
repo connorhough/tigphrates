@@ -18,6 +18,7 @@ import { activePlayerIndex } from './bridge/encoder'
 import { getAIAction } from './ai/simpleAI'
 import { getRemoteAIAction } from './ai/remotePolicy'
 import { SeatPolicy, DEFAULT_HEURISTIC, DEFAULT_HUMAN } from './types/seatPolicy'
+import { postGameLog } from './lab/labApi'
 
 type View = 'setup' | 'lab' | 'game'
 
@@ -48,6 +49,27 @@ function App() {
     [seatPolicies],
   )
 
+  // Auto-archive every finished game so I can review them with the user
+  // here. Best-effort: lab server may be offline; swallow errors.
+  const handleGameEnd = useCallback((log: string[], finalState: GameState) => {
+    const meta = {
+      seatPolicies: seatPolicies.map(sp => sp.kind === 'onnx'
+        ? { kind: sp.kind, modelUrl: sp.modelUrl }
+        : { kind: sp.kind },
+      ),
+      finalScores: finalState.players.map(p => ({
+        dynasty: p.dynasty,
+        score: { ...p.score },
+        treasures: p.treasures,
+        minScore: Math.min(...Object.values(p.score) as number[]),
+      })),
+      timestamp: new Date().toISOString(),
+    }
+    postGameLog(log, meta).catch(err => {
+      console.warn('Game log archive failed (lab server offline?):', err)
+    })
+  }, [seatPolicies])
+
   const {
     state,
     dispatch,
@@ -58,7 +80,7 @@ function App() {
     setSelectedLeader,
     setPlacingCatastrophe,
     startNewGame,
-  } = useGame({ getAIAction: policy })
+  } = useGame({ getAIAction: policy, onGameEnd: handleGameEnd })
 
   const currentPlayer = state.players[state.currentPlayer]
   const isAITurn = !!currentPlayer.isAI
