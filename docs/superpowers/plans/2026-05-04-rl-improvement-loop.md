@@ -4,7 +4,7 @@
 
 **Goal:** Extend the existing autoresearch loop so that, after a kept training run, a Claude expert agent reviews rich move traces from headless games and a Claude DS agent translates that critique into a concrete `python/train.py` edit.
 
-**Architecture:** Add a new `python/play_traced.py` that loads `models/policy_best.pt` and plays N headless games against (a) the heuristic and (b) the prior pool champion, dumping per-move telemetry (top-5 type/param probs, value estimate, decoded action label, immediate reward and shaping breakdown) to `traces/<commit>/game_<i>.jsonl`. Modify `python/run_experiments.sh` so that on the "kept" branch it runs the trace generator, dispatches a stateless `claude -p` expert agent (writes `traces/<commit>/critique.md`), then dispatches a stateless `claude -p` DS agent (edits and commits `python/train.py`). Each agent gets the current shaping config so it does not propose duplicating existing incentives. If any new step fails, fall back to the existing direct-Claude-edit path.
+**Architecture:** Add a new `python/play_traced.py` that loads `models/policy_final.pt` (the file refreshed by every training run; `policy_best.pt` may be from an older architecture and is not used by default) and plays N headless games against (a) the heuristic and (b) the prior pool champion, dumping per-move telemetry (top-5 type/param probs, value estimate, decoded action label, immediate reward and shaping breakdown) to `traces/<commit>/game_<i>.jsonl`. Modify `python/run_experiments.sh` so that on the "kept" branch it runs the trace generator, dispatches a stateless `claude -p` expert agent (writes `traces/<commit>/critique.md`), then dispatches a stateless `claude -p` DS agent (edits and commits `python/train.py`). Each agent gets the current shaping config so it does not propose duplicating existing incentives. If any new step fails, fall back to the existing direct-Claude-edit path.
 
 **Tech Stack:** Python 3 (torch, numpy, gymnasium), bash, the existing TS bridge (`src/bridge/server.ts`), `claude` CLI in stateless `--print` mode. Tests run under `pytest` in `python/tests/`. No new pip dependencies.
 
@@ -494,7 +494,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--games-vs-champion", type=int, default=2,
                    help="Reserved; champion-opponent path is implemented in Task 6.")
     p.add_argument("--max-turns", type=int, default=1200)
-    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_best.pt"))
+    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_final.pt"),
+                   help="Default to policy_final.pt (updated every training run) rather "
+                        "than policy_best.pt (which may be from an older architecture). "
+                        "Set explicitly via --model-path if you want the all-time best.")
     args = p.parse_args(argv)
 
     total = args.games_vs_heuristic + args.games_vs_champion
@@ -596,23 +599,33 @@ Expected: FAIL — `type_top5` not in record.
 
 - [ ] **Step 3: Implement model loading + telemetry**
 
-Edit `python/play_traced.py`. Add these imports near the top (after the existing imports):
+Edit `python/play_traced.py`. Add these imports near the top (after the existing imports). Symbol locations have been verified against the live source — do **not** guess substitutes if anything fails to import; report it instead.
 
 ```python
 import numpy as np
 import torch
 
+# train.py owns the network class, action-layout constants, and the
+# legacy-state-dict adapter. policy_server.py owns _build_policy_obs
+# (it lives there because the server has the same need as we do —
+# convert a raw bridge observation into the network's expected shape).
 from train import (
-    PolicyNet,
+    PolicyValueNetwork,
     NUM_ACTION_TYPES,
     TYPE_PARAM_SIZES,
     TYPE_BASES,
     DEVICE,
-    _build_policy_obs,
+    _adapt_state_dict,
 )
+from policy_server import _build_policy_obs
 ```
 
-Note: `_build_policy_obs` is the helper that converts the bridge's raw observation dict into the model's expected obs format. It already exists in `train.py` (used by `evaluate.py`) — we are not creating a new one. If the actual symbol name is different in the live `train.py`, prefer the symbol used by `evaluate.py` for the same purpose; the import line should be adjusted to match.
+Verified locations at time of writing:
+- `train.py:419` defines `class PolicyValueNetwork`
+- `train.py:338` defines `def _adapt_state_dict(state_dict)`
+- `policy_server.py:62` defines `def _build_policy_obs(raw)`
+- `train.py:223` defines `NUM_ACTION_TYPES = 10` and the `TYPE_PARAM_SIZES` / `TYPE_BASES` arrays follow
+- `train.py:DEVICE` (search for `DEVICE = ` near the top of the module)
 
 Add an action-type name table near the top of the file (these mirror the comment block at `python/train.py:217-235`):
 
@@ -632,26 +645,38 @@ ACTION_TYPE_NAMES = [
 assert len(ACTION_TYPE_NAMES) == NUM_ACTION_TYPES
 ```
 
-Add a helper that loads the model. Note we use `model.train(False)` to put the network in inference mode — equivalent to `model.eval()` but spelled to avoid confusion with Python's built-in code-evaluation function:
+Add a helper that loads the model. The loader mirrors the canonical pattern at `policy_server.py:102-107` so behavior is identical to the live server. We use `model.train(False)` to put the network in inference mode — equivalent to `.eval()` but spelled this way to avoid the security-hook collision with Python's built-in `eval`:
 
 ```python
-def _load_model(model_path: pathlib.Path) -> PolicyNet | None:
-    """Load policy weights. Returns None if path is missing — caller falls
-    back to fresh-init weights, which still exercises the telemetry path
-    in tests where no checkpoint exists yet."""
-    model = PolicyNet().to(DEVICE)
+def _load_model(model_path: pathlib.Path) -> PolicyValueNetwork:
+    """Load policy weights. If the checkpoint is missing, returns a
+    freshly-initialized network — telemetry from random weights is
+    still useful for exercising the trace path in tests where no
+    checkpoint exists yet.
+
+    Loader mirrors policy_server.py:102-107: load to CPU first, run
+    _adapt_state_dict (handles pre-11.1 flat policy_head -> hierarchical
+    type_head/param_head migration), load with strict=False (some keys
+    may be missing if the architecture has moved on; warn loudly if so),
+    then move to DEVICE.
+    """
+    model = PolicyValueNetwork()
     if model_path.exists():
-        sd = torch.load(model_path, map_location=DEVICE)
-        # train.py has a backward-compat shim for pre-11.1 flat policy_head;
-        # if it's exposed as a function, prefer it. Otherwise use load_state_dict
-        # with strict=False so legacy checkpoints don't crash trace generation.
-        try:
-            from train import _adapt_legacy_state_dict  # type: ignore
-            sd = _adapt_legacy_state_dict(sd)
-        except ImportError:
-            pass
-        model.load_state_dict(sd, strict=False)
-    model.train(False)  # inference mode — no dropout, no BN updates
+        sd = torch.load(model_path, map_location="cpu")
+        sd = _adapt_state_dict(sd)
+        result = model.load_state_dict(sd, strict=False)
+        # Loud warning when the checkpoint is from a different architecture.
+        # Without this, policy_best.pt from an older arch silently loads as
+        # near-random weights and the expert agent critiques noise.
+        if result.missing_keys or result.unexpected_keys:
+            print(
+                f"[play_traced] WARNING: state_dict mismatch loading {model_path}: "
+                f"missing={len(result.missing_keys)} unexpected={len(result.unexpected_keys)}. "
+                "Check that the checkpoint matches the current architecture.",
+                file=sys.stderr,
+            )
+    model.train(False)
+    model.to(DEVICE)
     return model
 ```
 
@@ -660,7 +685,7 @@ Add the telemetry-producing inference helper:
 ```python
 @torch.no_grad()
 def _model_action_with_telemetry(
-    model: PolicyNet,
+    model: PolicyValueNetwork,
     obs_raw: dict,
     mask: np.ndarray,
 ) -> dict:
@@ -723,7 +748,7 @@ Replace `_play_single_game` with a version that uses the model on the model's se
 def _play_single_game(
     bridge: BridgeProcess,
     *,
-    model: PolicyNet | None,
+    model: PolicyValueNetwork | None,
     model_seat: int,
     max_turns: int,
 ) -> list[dict]:
@@ -801,7 +826,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--games-vs-champion", type=int, default=2,
                    help="Reserved; champion-opponent path is implemented in Task 6.")
     p.add_argument("--max-turns", type=int, default=1200)
-    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_best.pt"))
+    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_final.pt"),
+                   help="Default to policy_final.pt (updated every training run) rather "
+                        "than policy_best.pt (which may be from an older architecture). "
+                        "Set explicitly via --model-path if you want the all-time best.")
     args = p.parse_args(argv)
 
     total = args.games_vs_heuristic + args.games_vs_champion
@@ -854,19 +882,26 @@ Append to `python/tests/test_play_traced.py`:
 ```python
 def test_two_games_vs_champion_when_pool_has_champion(tmp_path, monkeypatch):
     """If a pool exists with at least one snapshot, --games-vs-champion=2
-    produces 2 additional trace files for the champion match-up."""
+    produces 2 additional trace files for the champion match-up.
+
+    Schema note: elo.json is a flat dict keyed by full filename
+    (including the .pt extension). The agent's own rating lives under
+    the "_agent" key and must be excluded from champion candidates.
+    See python/evaluate.py:280-298 for the canonical reader/writer.
+    """
     pool_dir = tmp_path / "pool"
     pool_dir.mkdir()
-    # Drop a no-op marker file the script can detect. The actual loader
-    # will use highest-Elo entry from elo.json. We provide both.
+    # Flat schema: keys are filenames including ".pt"; "_agent" is the
+    # current agent's rating and must NOT be considered a champion.
     (pool_dir / "elo.json").write_text(json.dumps({
-        "ratings": {"policy_v0": 1200},
+        "_agent": 1500.0,
+        "policy_v0.pt": 1600.0,
+        "policy_v1.pt": 1550.0,
     }))
-    # The script will look for policy_v0.pt; copy whatever best file we have,
-    # or skip gracefully if no checkpoint exists yet.
-    src_best = pathlib.Path("models/policy_best.pt")
+    # The script will pick policy_v0.pt (highest non-_agent rating).
+    src_best = pathlib.Path("models/policy_final.pt")
     if not src_best.exists():
-        pytest.skip("models/policy_best.pt not present — champion path needs a real checkpoint")
+        pytest.skip("models/policy_final.pt not present — champion path needs a real checkpoint")
     (pool_dir / "policy_v0.pt").write_bytes(src_best.read_bytes())
 
     out_dir = tmp_path / "traces" / "champ"
@@ -900,18 +935,31 @@ Add the helper to `python/play_traced.py`:
 ```python
 def _resolve_champion(pool_dir: pathlib.Path) -> pathlib.Path | None:
     """Return the path to the highest-Elo .pt in the pool, or None if
-    the pool has no entries. Reads pool/elo.json; falls back to mtime
-    when elo.json is missing or empty."""
+    the pool has no entries.
+
+    Schema (verified against python/evaluate.py:280-298 and live
+    models/pool/elo.json): a flat dict keyed by full filename
+    (including the .pt extension). The current agent's own rating
+    lives under "_agent" and must be excluded:
+
+        {"_agent": 1399.9, "policy_init.pt": 1456.3, ...}
+
+    Falls back to mtime when elo.json is missing, empty, or corrupt.
+    """
     if not pool_dir.exists():
         return None
     elo_path = pool_dir / "elo.json"
     if elo_path.exists():
         try:
             elo = json.loads(elo_path.read_text())
-            ratings = elo.get("ratings") or {}
-            if ratings:
-                top = max(ratings.items(), key=lambda kv: kv[1])[0]
-                p = pool_dir / f"{top}.pt"
+            # Drop "_agent" and any non-numeric rows. Keys are full filenames.
+            candidates_by_rating = {
+                k: v for k, v in elo.items()
+                if k != "_agent" and isinstance(v, (int, float)) and k.endswith(".pt")
+            }
+            if candidates_by_rating:
+                top_filename = max(candidates_by_rating.items(), key=lambda kv: kv[1])[0]
+                p = pool_dir / top_filename
                 if p.exists():
                     return p
         except (json.JSONDecodeError, OSError):
@@ -926,8 +974,8 @@ Add a champion-vs-model game variant. Reuse `_play_single_game` but pass two mod
 def _play_single_game_two_models(
     bridge: BridgeProcess,
     *,
-    challenger: PolicyNet,
-    champion: PolicyNet,
+    challenger: PolicyValueNetwork,
+    champion: PolicyValueNetwork,
     challenger_seat: int,
     max_turns: int,
 ) -> list[dict]:
@@ -971,7 +1019,34 @@ def _play_single_game_two_models(
     return records
 ```
 
-Tag heuristic-game records with `opponent_kind: "heuristic"` in the heuristic loop (modify the existing `_play_single_game` to add this field at the same site you create each record — both in the model branch and the heuristic branch).
+Tag heuristic-game records with `opponent_kind: "heuristic"`. Modify `_play_single_game` (the heuristic-opponent function from Task 5) so **both** the model-player branch and the opponent branch set this field. Apply the change to both `records.append({...})` sites:
+
+```python
+            # In the is_model branch — add opponent_kind alongside the other fields:
+            records.append({
+                "turn": len(records),
+                "active_player": active,
+                "model_player": True,
+                "phase": va["turnPhase"],
+                "opponent_kind": "heuristic",   # NEW — every record in this game is vs heuristic
+                "chosen_action": { ... },
+                "type_top5": tel["type_top5"],
+                "param_top5_for_chosen_type": tel["param_top5_for_chosen_type"],
+                "value_estimate": tel["value_estimate"],
+            })
+
+            # And in the heuristic-opponent branch — same field:
+            records.append({
+                "turn": len(records),
+                "active_player": active,
+                "model_player": False,
+                "phase": va["turnPhase"],
+                "opponent_kind": "heuristic",   # NEW
+                "chosen_action": { ... },
+            })
+```
+
+The `_play_single_game_two_models` function defined just above already sets `opponent_kind: "champion"` on every record. After this change, every trace record carries `opponent_kind`, which the expert agent's prompt promises in Task 7.
 
 Wire up `main()` to handle both:
 
@@ -982,7 +1057,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--games-vs-heuristic", type=int, default=3)
     p.add_argument("--games-vs-champion", type=int, default=2)
     p.add_argument("--max-turns", type=int, default=1200)
-    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_best.pt"))
+    p.add_argument("--model-path", type=pathlib.Path, default=pathlib.Path("models/policy_final.pt"),
+                   help="Default to policy_final.pt (updated every training run) rather "
+                        "than policy_best.pt (which may be from an older architecture). "
+                        "Set explicitly via --model-path if you want the all-time best.")
     p.add_argument("--pool-dir", type=pathlib.Path, default=pathlib.Path("models/pool"))
     args = p.parse_args(argv)
 
@@ -1420,4 +1498,6 @@ Type/symbol consistency:
 - Prompt placeholders use the same names in templates and orchestrator substitution: `{{TRACES_DIR}}`, `{{NUM_GAMES}}`, `{{SHAPING_CONFIG_PATH}}`, `{{CRITIQUE_PATH}}`, `{{RESULTS_TSV}}`. ✓
 - `prune_traces` referenced in `generate_traces` is defined in the same Task-9 helper block. ✓
 
-Placeholder scan: no TBDs, no "implement later", no "similar to Task N" without code. The one explicit "if symbol name differs in live train.py, use the equivalent from evaluate.py" instruction in Task 5 is a documented coupling note, not a placeholder.
+Placeholder scan: no TBDs, no "implement later", no "similar to Task N" without code. Symbol imports in Task 5 are pinned to verified locations (`PolicyValueNetwork` at `train.py:419`, `_adapt_state_dict` at `train.py:338`, `_build_policy_obs` at `policy_server.py:62`).
+
+**Known follow-up (not in this plan):** the loop optimizes for "get an edit committed", not "make an edit that beats the prior model". After several iterations the DS agent may propose mutually-canceling tweaks (raise `treasure_collect_bonus`, then lower it next round) without anyone noticing. A follow-up task should pass the last 3 agent-driven commit diffs to the DS agent alongside the critique so it doesn't ping-pong. Defer until we see this happen in practice.
