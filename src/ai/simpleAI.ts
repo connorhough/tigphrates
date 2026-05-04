@@ -1,9 +1,7 @@
 import { GameState, GameAction, TileColor, LeaderColor, Position } from '../engine/types'
 import { getValidTilePlacements, getValidLeaderPlacements, canPlaceCatastrophe } from '../engine/validation'
-import { findKingdoms, getNeighbors } from '../engine/board'
+import { findKingdoms, getNeighbors, findConnectedGroup } from '../engine/board'
 import { countAdjacentTemples, countWarSupportTiles } from '../engine/conflict'
-
-const CATASTROPHE_MIN_TARGET_TILES = 3
 
 const TILE_COLORS: TileColor[] = ['red', 'blue', 'green', 'black']
 
@@ -174,12 +172,10 @@ function handleActionPhase(state: GameState): GameAction {
     if (action) return action
   }
 
-  // Catastrophe: only when there's a high-value disruption target. Picks
-  // an opponent kingdom where they have a leader collecting VP for a color
-  // we cannot contest (we have no leader of that color), and removes the
-  // highest-leverage face-up tile.
+  // Catastrophe: fire only when one of the three canonical patterns triggers
+  // (leader-sever, kingdom-split, monument-block). See findCatastropheMove.
   if (player.catastrophesRemaining > 0) {
-    const action = tryPlaceCatastrophe(state, player)
+    const action = findCatastropheMove(state, state.currentPlayer)
     if (action) return action
   }
 
@@ -402,67 +398,276 @@ function tryPlaceAnyTile(
 }
 
 /**
- * Pick a catastrophe placement that disrupts a strong opponent VP pipeline
- * we can't otherwise contest. Returns null if no high-leverage target.
+ * Pick a catastrophe placement matching one of three canonical T&E patterns:
+ *   1) Sever an opponent leader from its supporting red temples.
+ *   2) Split a large opponent kingdom at an articulation point.
+ *   3) Block a 3-of-4 monument formation.
+ * Patterns are tried in priority order. Returns null if no pattern fires.
  */
-function tryPlaceCatastrophe(
+export function findCatastropheMove(
   state: GameState,
-  player: GameState['players'][number],
+  playerIndex: number,
 ): GameAction | null {
-  const myDynasty = player.dynasty
-  const myLeaderColors = new Set(
-    player.leaders.filter(l => l.position !== null).map(l => l.color),
+  const player = state.players[playerIndex]
+  if (player.catastrophesRemaining <= 0) return null
+
+  return (
+    findSeverLeaderCatastrophe(state, playerIndex) ??
+    findKingdomSplitCatastrophe(state, playerIndex) ??
+    findMonumentBlockCatastrophe(state, playerIndex)
   )
+}
+
+/**
+ * Pattern 1: catastrophe a red temple to strand an opponent leader.
+ *
+ * Trigger: opponent leader sits in a kingdom with one or more adjacent
+ * face-up red temples. Catastrophing a temple that leaves the leader with
+ * zero adjacent face-up red temples will force its withdrawal.
+ *
+ * Guards:
+ *  - Opponent must be ahead of the AI in the leader's color score by **>=2**
+ *    (a one-point lead is not worth burning a catastrophe over, and the lax
+ *    >0 trigger fires too eagerly once the AI falls behind in red).
+ *  - The leader's kingdom must contain at least one treasure tile (high-
+ *    impact targets only — kingdoms without treasures contribute marginal VP).
+ *  - The catastrophe target must NOT be adjacent to one of the AI's own
+ *    leaders (so we don't destroy our own support).
+ */
+function findSeverLeaderCatastrophe(
+  state: GameState,
+  playerIndex: number,
+): GameAction | null {
+  const myDynasty = state.players[playerIndex].dynasty
+  const myScore = state.players[playerIndex].score
   const kingdoms = findKingdoms(state.board)
 
-  type Target = { pos: Position; weight: number }
-  let best: Target | null = null
-
   for (const kingdom of kingdoms) {
-    // Find opponent leaders in this kingdom by color.
-    const oppLeaderColors = new Set(
-      kingdom.leaders
-        .filter(l => l.dynasty !== myDynasty)
-        .map(l => l.color),
-    )
-    if (oppLeaderColors.size === 0) continue
+    const oppLeaders = kingdom.leaders.filter(l => l.dynasty !== myDynasty)
+    if (oppLeaders.length === 0) continue
 
-    for (const color of oppLeaderColors) {
-      // Only target colors we cannot contest by tile placement.
-      if (myLeaderColors.has(color)) continue
+    // Guard (b): kingdom must hold a treasure for severing to be worthwhile.
+    let kingdomHasTreasure = false
+    for (const pos of kingdom.positions) {
+      if (state.board[pos.row][pos.col].hasTreasure) {
+        kingdomHasTreasure = true
+        break
+      }
+    }
+    if (!kingdomHasTreasure) continue
 
-      // Count face-up tiles of this color in the kingdom.
-      const colorPositions: Position[] = []
-      for (const pos of kingdom.positions) {
-        const cell = state.board[pos.row][pos.col]
-        if (cell.tile === color && !cell.tileFlipped) {
-          colorPositions.push(pos)
+    for (const leader of oppLeaders) {
+      const oppPlayer = state.players.find(
+        p => p.dynasty === leader.dynasty,
+      )
+      if (!oppPlayer) continue
+      const scoreColor: TileColor = leader.color as TileColor
+      // Guard (a): opponent must be ahead by >=2 in this color.
+      if (oppPlayer.score[scoreColor] - myScore[scoreColor] < 2) continue
+
+      // Find adjacent face-up red temples to this leader.
+      const adjTemples: Position[] = []
+      for (const n of getNeighborPositions(leader.position)) {
+        const c = state.board[n.row][n.col]
+        if (c.tile === 'red' && !c.tileFlipped) {
+          adjTemples.push(n)
         }
       }
-      if (colorPositions.length < CATASTROPHE_MIN_TARGET_TILES) continue
+      if (adjTemples.length === 0) continue
 
-      // Choose a single target: highest-leverage face-up tile that's a legal
-      // catastrophe placement (no treasure, no adjacent leader, etc).
-      for (const pos of colorPositions) {
-        if (!canPlaceCatastrophe(state, pos)) continue
-        // Skip cells adjacent to one of MY leaders — destroying my own scoring base.
-        const neighbors = getNeighborPositions(pos)
-        const adjMyLeader = neighbors.some(n => {
-          const c = state.board[n.row][n.col]
-          return c.leader !== null && c.leader.dynasty === myDynasty
-        })
-        if (adjMyLeader) continue
-
-        const weight = colorPositions.length + (color === 'red' ? 1 : 0)
-        if (!best || weight > best.weight) {
-          best = { pos, weight }
+      for (const target of adjTemples) {
+        if (!canPlaceCatastrophe(state, target)) continue
+        if (isAdjacentToOwnLeader(state, target, myDynasty)) continue
+        // Would catastrophing this leave the leader with zero face-up temples?
+        const remaining = adjTemples.filter(
+          p => !(p.row === target.row && p.col === target.col),
+        )
+        if (remaining.length === 0) {
+          return { type: 'placeCatastrophe', position: target }
         }
       }
     }
   }
 
-  if (!best) return null
-  return { type: 'placeCatastrophe', position: best.pos }
+  return null
+}
+
+/**
+ * Pattern 2: split a large opponent kingdom at an articulation point.
+ *
+ * Trigger: kingdom has ≥6 occupied cells, contains ≥2 opponent leaders of
+ * different colors, and there is a single tile (cell) whose removal would
+ * disconnect the kingdom into multiple components.
+ *
+ * Implementation: brute-force articulation check by removing each candidate
+ * tile, running findConnectedGroup from a remaining cell, and comparing the
+ * resulting group size to (kingdom.size - 1). The board is 11x16 — fine.
+ */
+function findKingdomSplitCatastrophe(
+  state: GameState,
+  playerIndex: number,
+): GameAction | null {
+  const myDynasty = state.players[playerIndex].dynasty
+  const kingdoms = findKingdoms(state.board)
+
+  for (const kingdom of kingdoms) {
+    if (kingdom.positions.length < 6) continue
+
+    const oppLeaders = kingdom.leaders.filter(l => l.dynasty !== myDynasty)
+    if (oppLeaders.length < 2) continue
+    const oppColors = new Set(oppLeaders.map(l => l.color))
+    if (oppColors.size < 2) continue
+
+    // Candidate tiles: cells in the kingdom that have a face-up tile and no
+    // leader/treasure/monument (i.e., legal catastrophe targets).
+    for (const pos of kingdom.positions) {
+      const cell = state.board[pos.row][pos.col]
+      if (cell.tile === null || cell.tileFlipped) continue
+      if (!canPlaceCatastrophe(state, pos)) continue
+      if (isAdjacentToOwnLeader(state, pos, myDynasty)) continue
+
+      if (isArticulationPoint(state, kingdom.positions, pos)) {
+        return { type: 'placeCatastrophe', position: pos }
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Pattern 3: catastrophe one of three same-color tiles that form an L-shape
+ * inside a 2x2 footprint, preventing the opponent from completing the 2x2
+ * monument square next turn.
+ *
+ * Guards:
+ *  - The L-shape must be inside an opponent's kingdom (we're blocking THEIR
+ *    monument, not our own).
+ *  - Opponent must be ahead of the AI in the relevant color.
+ *  - The 4th cell of the 2x2 must be a legal tile placement (i.e. they could
+ *    actually complete it next turn).
+ */
+function findMonumentBlockCatastrophe(
+  state: GameState,
+  playerIndex: number,
+): GameAction | null {
+  const myDynasty = state.players[playerIndex].dynasty
+  const myScore = state.players[playerIndex].score
+  const board = state.board
+  const rows = board.length
+  const cols = board[0].length
+
+  for (let r = 0; r < rows - 1; r++) {
+    for (let c = 0; c < cols - 1; c++) {
+      const corners: Position[] = [
+        { row: r, col: c },
+        { row: r, col: c + 1 },
+        { row: r + 1, col: c },
+        { row: r + 1, col: c + 1 },
+      ]
+      const cells = corners.map(p => board[p.row][p.col])
+
+      // Find color appearing exactly 3 times across the 2x2 (face-up, same color).
+      const colorCounts = new Map<TileColor, number>()
+      for (const cell of cells) {
+        if (cell.tile && !cell.tileFlipped) {
+          colorCounts.set(cell.tile, (colorCounts.get(cell.tile) ?? 0) + 1)
+        }
+      }
+      let threeColor: TileColor | null = null
+      for (const [color, count] of colorCounts) {
+        if (count === 3) {
+          threeColor = color
+          break
+        }
+      }
+      if (!threeColor) continue
+
+      // The empty corner must be a legal placement of `threeColor` for the
+      // opponent to be one move away from completing the 2x2.
+      const emptyCorner = corners.find((p, i) => {
+        const cell = cells[i]
+        return cell.tile === null && cell.leader === null && !cell.catastrophe && cell.monument === null
+      })
+      if (!emptyCorner) continue
+      const validForColor = getValidTilePlacements(state, threeColor)
+      const emptyIsValid = validForColor.some(
+        p => p.row === emptyCorner.row && p.col === emptyCorner.col,
+      )
+      if (!emptyIsValid) continue
+
+      // The 2x2 must overlap an opponent kingdom (so they're the ones building it).
+      const kingdoms = findKingdoms(state.board)
+      const overlappingKingdom = kingdoms.find(k =>
+        k.positions.some(p =>
+          corners.some(cp => cp.row === p.row && cp.col === p.col),
+        ),
+      )
+      if (!overlappingKingdom) continue
+      const oppLeaderInK = overlappingKingdom.leaders.find(l => l.dynasty !== myDynasty)
+      if (!oppLeaderInK) continue
+      const oppPlayer = state.players.find(p => p.dynasty === oppLeaderInK.dynasty)
+      if (!oppPlayer) continue
+      // Asymmetric guard.
+      if (oppPlayer.score[threeColor] <= myScore[threeColor]) continue
+
+      // Pick any of the 3 same-color corners that's a legal catastrophe target
+      // and not adjacent to one of our own leaders.
+      for (let i = 0; i < corners.length; i++) {
+        const cell = cells[i]
+        if (cell.tile !== threeColor || cell.tileFlipped) continue
+        if (!canPlaceCatastrophe(state, corners[i])) continue
+        if (isAdjacentToOwnLeader(state, corners[i], myDynasty)) continue
+        return { type: 'placeCatastrophe', position: corners[i] }
+      }
+    }
+  }
+
+  return null
+}
+
+/**
+ * Returns true if removing `removed` from the kingdom would disconnect it.
+ * Uses brute-force: temporarily clears the cell, walks the connected group
+ * from another kingdom cell, compares to expected size.
+ */
+function isArticulationPoint(
+  state: GameState,
+  kingdomPositions: Position[],
+  removed: Position,
+): boolean {
+  if (kingdomPositions.length <= 2) return false
+  // Pick a starting cell that isn't `removed`.
+  const start = kingdomPositions.find(
+    p => !(p.row === removed.row && p.col === removed.col),
+  )
+  if (!start) return false
+
+  // Clone the relevant cell, clear it, run BFS, then restore.
+  const cell = state.board[removed.row][removed.col]
+  const savedTile = cell.tile
+  const savedLeader = cell.leader
+  cell.tile = null
+  cell.leader = null
+  try {
+    const group = findConnectedGroup(state.board, start)
+    return group.length < kingdomPositions.length - 1
+  } finally {
+    cell.tile = savedTile
+    cell.leader = savedLeader
+  }
+}
+
+function isAdjacentToOwnLeader(
+  state: GameState,
+  pos: Position,
+  myDynasty: string,
+): boolean {
+  for (const n of getNeighborPositions(pos)) {
+    const c = state.board[n.row][n.col]
+    if (c.leader !== null && c.leader.dynasty === myDynasty) return true
+  }
+  return false
 }
 
 /**
