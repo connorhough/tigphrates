@@ -38,6 +38,7 @@ from evaluate import (
     ELO_AGENT_KEY,
     print_summary,
 )
+from shaping_config_dump import dump_shaping_config
 
 # ---------------------------------------------------------------------------
 # Hyperparameters (edit these directly)
@@ -1719,6 +1720,7 @@ if __name__ == "__main__":
     model_path = RUN_DIR / "policy_final.pt"
     torch.save(model.state_dict(), str(model_path))
     print(f"\nModel saved to {model_path}")
+    dump_shaping_config(RUN_DIR / "shaping_config.json")
 
     # Also save a resumable checkpoint with optimizer + RNG state so a
     # long training session can survive interruption (Mac mini sleep,
