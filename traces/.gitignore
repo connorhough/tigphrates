@@ -1,0 +1,4 @@
+# Generated move traces from python/play_traced.py.
+# Keep the directory in git but exclude all generated content.
+*
+!.gitignore
