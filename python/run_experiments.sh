@@ -145,12 +145,25 @@ run_ds_agent() {
   local critique="traces/${commit}/critique.md"
   local shaping="models/shaping_config.json"
   [[ -s "$critique" ]] || return 1
+  # Anti-ping-pong context: last 3 patches to python/train.py with their
+  # commit subjects. Cap at ~6000 chars so the prompt doesn't balloon.
+  local last_diffs
+  last_diffs=$(git log -3 --pretty=format:'=== %h %s ===%n' -p -- python/train.py 2>/dev/null | head -c 6000)
+  [[ -z "$last_diffs" ]] && last_diffs="(no prior train.py history)"
   local prompt
-  prompt=$(sed \
+  # Substitute LAST_DS_EDITS via a temp file because sed chokes on
+  # multi-line replacement values (newlines in $last_diffs).
+  local tmp_prompt
+  tmp_prompt=$(mktemp)
+  sed \
     -e "s|{{CRITIQUE_PATH}}|$critique|g" \
     -e "s|{{SHAPING_CONFIG_PATH}}|$shaping|g" \
     -e "s|{{RESULTS_TSV}}|$TSV|g" \
-    prompts/rl_ds.md)
+    prompts/rl_ds.md > "$tmp_prompt"
+  # Replace the {{LAST_DS_EDITS}} placeholder in-place using awk so
+  # multi-line content lands intact.
+  prompt=$(awk -v r="$last_diffs" '{ gsub(/\{\{LAST_DS_EDITS\}\}/, r); print }' "$tmp_prompt")
+  rm -f "$tmp_prompt"
   claude --print --output-format text \
     --model claude-opus-4-7 \
     --allowedTools Edit,Read,Bash,Grep,Glob \

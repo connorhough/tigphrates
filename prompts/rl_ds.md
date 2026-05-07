@@ -14,6 +14,16 @@ that addresses the most pressing issue from the critique.
 - Recent results: `{{RESULTS_TSV}}` — last ~10 runs (commit, win_rate,
   avg_min_score, status, description). Avoid repeating an idea that was
   recently tried and discarded.
+- Last 3 DS-agent edits to `python/train.py`, with their commits and
+  the kept/discarded outcome from `results.tsv`:
+
+```
+{{LAST_DS_EDITS}}
+```
+
+  Avoid ping-pong: don't propose an edit that reverses one of these
+  recent changes unless you have strong evidence (in the critique or
+  results) that the prior direction was wrong.
 - The current `python/train.py`. Read it; do not assume its layout.
 
 ## Rules
