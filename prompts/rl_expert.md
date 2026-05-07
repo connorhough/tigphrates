@@ -23,7 +23,7 @@ explain it precisely enough that a data scientist can act on it.
 
 ## What I want from you
 
-Write a markdown critique to `{{CRITIQUE_PATH}}`. Structure:
+Respond with the critique as markdown text directly — your stdout is captured by the orchestrator and saved to `{{CRITIQUE_PATH}}`. Do not call any Write tool; just print the markdown. Structure:
 
 1. **Recurring strategic patterns** — 2–4 bullet points naming concrete
    classes of move you saw the model make repeatedly. Reference at least
