@@ -133,7 +133,7 @@ run_expert_agent() {
     -e "s|{{CRITIQUE_PATH}}|$critique|g" \
     prompts/rl_expert.md)
   claude --print --output-format text \
-    --model claude-sonnet-4-6 \
+    --model claude-opus-4-7 \
     --allowedTools Read,Glob,Grep \
     -p "$prompt" > "$critique" 2>> "$LOG.expert"
   [[ -s "$critique" ]]
@@ -152,7 +152,7 @@ run_ds_agent() {
     -e "s|{{RESULTS_TSV}}|$TSV|g" \
     prompts/rl_ds.md)
   claude --print --output-format text \
-    --model claude-sonnet-4-6 \
+    --model claude-opus-4-7 \
     --allowedTools Edit,Read,Bash,Grep,Glob \
     -p "$prompt" >> "$LOG.ds" 2>&1
   # The DS agent commits its own edit. We just check that something
@@ -212,7 +212,7 @@ Best win_rate: ${best_wr}
 Current train.py is at python/train.py — read it, then edit with your idea."
 
   local claude_json
-  claude_json=$(claude --print --output-format json --model claude-sonnet-4-6 --allowedTools Edit,Read,Bash,Grep,Glob -p "$prompt")
+  claude_json=$(claude --print --output-format json --model claude-opus-4-7 --allowedTools Edit,Read,Bash,Grep,Glob -p "$prompt")
 
   # Log token usage to JSON
   local ts input_tokens output_tokens cache_read cache_creation cost_usd
@@ -260,33 +260,44 @@ for ((run=1; run<=MAX_RUNS; run++)); do
   echo "  EXPERIMENT ${run}"
   echo "============================================"
 
+  ds_pending=false
   if [[ "$run" -eq 1 ]]; then
     echo ">>> Baseline run (no changes)"
   elif [[ -f ".autoresearch_ds_pending" ]]; then
     echo ">>> Using edit produced by DS agent in previous iteration."
     rm -f ".autoresearch_ds_pending"
+    ds_pending=true
   else
     echo ">>> Asking Claude for next experiment (fallback path)..."
     ask_claude_for_edit
   fi
 
-  # Commit current state
-  desc=$(git diff --stat python/train.py 2>/dev/null | tail -1 || echo "no changes")
-  git add python/train.py
-  if git diff --cached --quiet; then
-    if [[ "$run" -eq 1 ]]; then
-      desc="baseline PPO"
-      git commit --allow-empty -m "experiment ${run}: ${desc}"
-    else
-      echo ">>> No changes made, skipping"
-      continue
-    fi
+  if $ds_pending; then
+    # DS agent already committed in the previous iteration. Use HEAD as
+    # this experiment's commit; pull the description from the commit
+    # subject (strip any "experiment N:" prefix the legacy path adds).
+    desc=$(git log -1 --pretty=%s | sed -E 's|^experiment [0-9]+: ||')
+    commit=$(git rev-parse --short HEAD)
   else
-    # Get a 1-line description from the diff
-    desc=$(git diff --cached python/train.py | head -30 | grep "^+" | grep -v "^+++" | head -5 | tr '\n' ' ' | cut -c1-80)
-    git commit -m "experiment ${run}: ${desc}"
+    # Legacy path: ask_claude_for_edit modifies train.py in the working
+    # tree without committing; stage and commit it here.
+    desc=$(git diff --stat python/train.py 2>/dev/null | tail -1 || echo "no changes")
+    git add python/train.py
+    if git diff --cached --quiet; then
+      if [[ "$run" -eq 1 ]]; then
+        desc="baseline PPO"
+        git commit --allow-empty -m "experiment ${run}: ${desc}"
+      else
+        echo ">>> No changes made, skipping"
+        continue
+      fi
+    else
+      # Get a 1-line description from the diff
+      desc=$(git diff --cached python/train.py | head -30 | grep "^+" | grep -v "^+++" | head -5 | tr '\n' ' ' | cut -c1-80)
+      git commit -m "experiment ${run}: ${desc}"
+    fi
+    commit=$(git rev-parse --short HEAD)
   fi
-  commit=$(git rev-parse --short HEAD)
 
   # Run experiment
   if run_experiment; then
