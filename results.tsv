@@ -59,3 +59,4 @@ a96b065	0.000000	0.0	crash	timeout/crash: +SYMMETRY_AUG = os.environ.get("SYMMET
 140657c	0.000000	0.0	crash	timeout/crash: +# Linear anneal from ENTROPY_COEF (start) to ENTROPY_COEF_FINAL (end of +# trai
 80f5613	0.000000	0.0	crash	timeout/crash: +POTENTIAL_GAMMA_SHAPING_COEF = float(os.environ.get("POTENTIAL_GAMMA_SHAPING_CO
 6364287	0.000000	0.0	crash	timeout/crash: +REPLAY_K = int(os.environ.get("REPLAY_K", 0))  # disabled: PPO update was 6× o
+e8a94ca	0.000000	0.0	keep	baseline PPO (vs_pool=0.375)

@@ -66,6 +66,16 @@ SCORE_AVG_WEIGHT = float(os.environ.get("SCORE_AVG_WEIGHT", 0.5))
 # experiment, but it can change the optimized game objective; keep it opt-in.
 MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 0.0))
 
+# Action-tail penalties from trace review. These target moves that the model's
+# argmax usually avoids but stochastic sampling still plays often enough to
+# ruin games: unaimed catastrophes, voluntary leader withdrawals, empty
+# conflict support while support is available, and pure pass actions.
+CATASTROPHE_ACTION_PENALTY = float(os.environ.get("CATASTROPHE_ACTION_PENALTY", 0.15))
+WITHDRAW_ACTION_PENALTY = float(os.environ.get("WITHDRAW_ACTION_PENALTY", 0.25))
+EMPTY_SUPPORT_PENALTY = float(os.environ.get("EMPTY_SUPPORT_PENALTY", 0.20))
+PASS_ACTION_PENALTY = float(os.environ.get("PASS_ACTION_PENALTY", 0.05))
+LEADER_EXPULSION_PENALTY = float(os.environ.get("LEADER_EXPULSION_PENALTY", 1.0))
+
 # Potential-based reward shaping (Ng, Harada, Russell 1999):
 #   F(s, s') = coef * (gamma * Phi(s') - Phi(s))
 # with Phi(s) = active-player min-color score. Policy-invariant by
@@ -250,6 +260,45 @@ assert _acc == ACTION_SPACE_SIZE, (
     f"hierarchical layout total {_acc} != ACTION_SPACE_SIZE {ACTION_SPACE_SIZE}"
 )
 MAX_PARAMS = max(TYPE_PARAM_SIZES)
+
+
+def compute_action_penalty(action_index: int, prev_obs: dict, next_obs: dict) -> float:
+    """Negative shaping for trace-observed action-noise failure modes.
+
+    Returns a non-positive reward adjustment. All coefficients are env-var
+    overridable so long runs can ablate this without editing code.
+    """
+    type_idx = int(_FLAT_TO_TYPE_NP[int(action_index)])
+    param_idx = int(_FLAT_TO_PARAM_NP[int(action_index)])
+    penalty = 0.0
+
+    if type_idx == 3:  # placeCatastrophe
+        penalty -= CATASTROPHE_ACTION_PENALTY
+    elif type_idx == 2:  # withdrawLeader
+        penalty -= WITHDRAW_ACTION_PENALTY
+    elif type_idx == 5:  # pass
+        penalty -= PASS_ACTION_PENALTY
+    elif type_idx == 6 and param_idx == 0:  # commitSupport(empty)
+        conflict = prev_obs.get("conflict")
+        if conflict is not None and len(conflict) >= 9:
+            is_attacker = float(conflict[5]) > 0.5
+            is_defender = float(conflict[6]) > 0.5
+            attacker_hand = float(conflict[7])
+            defender_hand = float(conflict[8])
+            support_available = (is_attacker and attacker_hand > 0) or (is_defender and defender_hand > 0)
+            if support_available:
+                penalty -= EMPTY_SUPPORT_PENALTY
+
+    prev_leaders = np.asarray(prev_obs.get("leaders", []), dtype=np.float32)
+    next_leaders = np.asarray(next_obs.get("leaders", []), dtype=np.float32)
+    if prev_leaders.shape[0] >= 8 and next_leaders.shape[0] >= 8:
+        prev_cols = prev_leaders[1::2]
+        next_cols = next_leaders[1::2]
+        expulsions = int(np.sum((prev_cols >= 0) & (next_cols < 0)))
+        if expulsions > 0:
+            penalty -= LEADER_EXPULSION_PENALTY * expulsions
+
+    return penalty
 
 # Precomputed gather/decoding tensors. Built on CPU at import; moved per-call
 # onto the same device as the logits so this works under MPS / CUDA / CPU.
@@ -955,6 +1004,12 @@ def collect_rollout_vec(
                         and monument_builds[i] < 2):
                     monument_builds[i] += 1
 
+            shaped += compute_action_penalty(
+                action_index=actions_list[i],
+                prev_obs=obs_per_env[i],
+                next_obs=obs_new,
+            )
+
             per_env_rewards[i].append(shaped)
             per_env_dones[i].append(float(done))
             current_ep_rewards[i] += shaped
@@ -1124,6 +1179,7 @@ def collect_rollout(env, model, rollout_steps):
         new_margin = new_min_score - new_opp_min
         margin_delta = new_margin - prev_margin
         reward = reward + MARGIN_DELTA_COEF * margin_delta
+        reward = reward + compute_action_penalty(action.item(), obs_list[-1], obs)
 
         reward_list.append(reward)
         done_list.append(float(done))
