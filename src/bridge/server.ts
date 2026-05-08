@@ -280,19 +280,35 @@ function handleDecodeAction(params: { gameId: number; actionIndex: number }) {
 
 // --- Main loop ---
 
-const HANDLERS: Record<string, (params: any) => any> = {
-  create: handleCreate,
-  step: handleStep,
-  step_action: handleStepAction,
-  get_state: handleGetState,
-  get_observation: handleGetObservation,
-  valid_actions: handleValidActions,
-  reset: handleReset,
-  ai_action: handleAIAction,
-  load_state: handleLoadState,
-  decode_action: handleDecodeAction,
-  delete_game: handleDeleteGame,
-  agent_step: handleAgentStep,
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue }
+
+interface JsonRpcRequest {
+  id?: number
+  method?: string
+  params?: JsonValue
+}
+
+type Handler = (params: unknown) => unknown
+
+const HANDLERS: Record<string, Handler> = {
+  create: params => handleCreate(params as { playerCount: number }),
+  step: params => handleStep(params as { gameId: number; actionIndex: number; playerIndex: number }),
+  step_action: params => handleStepAction(params as { gameId: number; action: GameAction; playerIndex: number }),
+  get_state: params => handleGetState(params as { gameId: number }),
+  get_observation: params => handleGetObservation(params as { gameId: number; playerIndex: number }),
+  valid_actions: params => handleValidActions(params as { gameId: number }),
+  reset: params => handleReset(params as { gameId: number; playerCount?: number }),
+  ai_action: params => handleAIAction(params as { gameId: number }),
+  load_state: params => handleLoadState(params as { state: GameState }),
+  decode_action: params => handleDecodeAction(params as { gameId: number; actionIndex: number }),
+  delete_game: params => handleDeleteGame(params as { gameId: number }),
+  agent_step: params => handleAgentStep(params as { gameId: number; actionIndex: number; agentPlayer: number }),
 }
 
 const rl = readline.createInterface({ input: process.stdin })
@@ -300,14 +316,16 @@ const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', (line: string) => {
   let id = 0
   try {
-    const req = JSON.parse(line)
+    const req = JSON.parse(line) as JsonRpcRequest
     id = req.id ?? 0
+    if (!req.method) throw new Error('Missing method')
     const handler = HANDLERS[req.method]
     if (!handler) throw new Error(`Unknown method: ${req.method}`)
     const result = handler(req.params ?? {})
     process.stdout.write(JSON.stringify({ id, result }) + '\n')
-  } catch (err: any) {
-    process.stdout.write(JSON.stringify({ id, error: err.message ?? String(err) }) + '\n')
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    process.stdout.write(JSON.stringify({ id, error: message }) + '\n')
   }
 })
 

@@ -22,7 +22,7 @@ def test_fresh_network_exports_to_onnx(tmp_path):
         torch.zeros(1, 6, dtype=torch.int64),
         torch.zeros(1, 4, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),
-        torch.zeros(1, 7, dtype=torch.float32),
+        torch.zeros(1, 9, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),
         torch.zeros(1, 4, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),

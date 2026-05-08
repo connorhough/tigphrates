@@ -62,7 +62,9 @@ MAX_EPISODE_STEPS = int(os.environ.get("MAX_EPISODE_STEPS", 2000))
 # Reward shaping
 SCORE_DELTA_COEF = float(os.environ.get("SCORE_DELTA_COEF", 1.5))
 SCORE_AVG_WEIGHT = float(os.environ.get("SCORE_AVG_WEIGHT", 0.5))
-MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 1.0))
+# Default to potential-based shaping only. Margin shaping is useful as an
+# experiment, but it can change the optimized game objective; keep it opt-in.
+MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 0.0))
 
 # Potential-based reward shaping (Ng, Harada, Russell 1999):
 #   F(s, s') = coef * (gamma * Phi(s') - Phi(s))
@@ -132,7 +134,7 @@ def bc_init_checkpoint_path() -> str | None:
 # rollout rows keep the standard PPO ratio. Value targets for replay rows are
 # slightly stale (we do not recompute GAE under the current value head); at
 # REPLAY_K=2 the bias is small and PPO's clip keeps gradients bounded.
-REPLAY_K = int(os.environ.get("REPLAY_K", 2))
+REPLAY_K = int(os.environ.get("REPLAY_K", 0))
 REPLAY_RHO_BAR = float(os.environ.get("REPLAY_RHO_BAR", 1.0))
 
 # Architecture (env-var overridable so a sweep can scale capacity).
@@ -222,6 +224,11 @@ NUM_ENVS = 4              # parallel Tigphrates envs (one Node subprocess each)
 # pushes mass into invalid regions.
 
 NUM_ACTION_TYPES = 10
+ACTION_TYPE_NAMES = [
+    "placeTile", "placeLeader", "withdrawLeader", "placeCatastrophe",
+    "swapTiles", "pass", "commitSupport", "chooseWarOrder",
+    "buildMonument", "declineMonument",
+]
 TYPE_PARAM_SIZES = [
     4 * BOARD_ROWS * BOARD_COLS,  # placeTile
     4 * BOARD_ROWS * BOARD_COLS,  # placeLeader
@@ -440,9 +447,9 @@ class PolicyValueNetwork(nn.Module):
         self.board_encoder = BoardEncoder()
         C = self.board_encoder.channels
 
-        # Extras: hand(4) + hand_seq(30) + scores(4) + meta(8) + conflict(7)
-        #       + leaders(8) + opp_scores(4) + opp_leaders(8) = 73
-        extra_dim = 4 + 30 + 4 + 8 + 7 + 8 + 4 + 8
+        # Extras: hand(4) + hand_seq(30) + scores(4) + meta(8) + conflict(9)
+        #       + leaders(8) + opp_scores(4) + opp_leaders(8) = 75
+        extra_dim = 4 + 30 + 4 + 8 + 9 + 8 + 4 + 8
         # Pool the spatial map (global average pool) before concat with extras
         # for the type / value / nonspatial heads. Keeps the trunk dim O(C),
         # not O(C*H*W), so the heads stay small even with a wider tower.
@@ -544,7 +551,7 @@ class PolicyValueNetwork(nn.Module):
         hand_seq = obs["hand_seq"]     # (B, 6) ints in {-1, 0, 1, 2, 3}
         scores = obs["scores"]         # (B, 4)
         meta = obs["meta"]             # (B, 8)
-        conflict = obs["conflict"]     # (B, 7)
+        conflict = obs["conflict"]     # (B, 9)
         leaders = obs["leaders"]       # (B, 8)
         opp_scores = obs["opp_scores"] # (B, 4)
         opp_leaders = obs["opp_leaders"] # (B, 8)
@@ -1020,6 +1027,11 @@ def collect_rollout_vec(
             exp = all_expert[i]
             all_expert.append(int(_MIRROR_PERM_NP[exp]) if exp >= 0 else -1)
 
+    action_type_counts = np.bincount(
+        _FLAT_TO_TYPE_NP[np.asarray(all_actions, dtype=np.int64)],
+        minlength=NUM_ACTION_TYPES,
+    ).astype(np.int64) if all_actions else np.zeros(NUM_ACTION_TYPES, dtype=np.int64)
+
     return {
         "obs": all_obs,
         "actions": np.array(all_actions),
@@ -1031,6 +1043,7 @@ def collect_rollout_vec(
         "expert_actions": np.array(all_expert, dtype=np.int64),
         "episode_rewards": episode_rewards,
         "steps": steps_collected,
+        "action_type_counts": action_type_counts,
     }
 
 
@@ -1200,6 +1213,10 @@ def combine_with_replay(current: dict, replay_buf) -> dict:
         "is_replay": np.array(is_replay, dtype=bool),
         "episode_rewards": current.get("episode_rewards", []),
         "steps": current.get("steps", 0),
+        "action_type_counts": current.get(
+            "action_type_counts",
+            np.zeros(NUM_ACTION_TYPES, dtype=np.int64),
+        ),
     }
 
 
@@ -1359,13 +1376,36 @@ def ppo_update(model, optimizer, rollout):
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def make_policy_fn(model):
-    """Create a policy function for evaluation."""
+def _greedy_action(model, obs_tensor, action_mask) -> int:
+    """Return the highest-probability legal flat action under the
+    hierarchical policy. This is the deterministic policy used for primary
+    evaluation and pool opponents."""
+    type_logits, param_logits, _ = model.forward(obs_tensor)
+    type_dist, param_logits_padded, _ = model.hierarchical_dists(
+        type_logits, param_logits, action_mask
+    )
+    device = type_logits.device
+    type_log_probs = type_dist.logits  # Categorical stores normalized log-probs.
+    param_log_probs = F.log_softmax(param_logits_padded, dim=-1)
+    joint = type_log_probs.unsqueeze(-1) + param_log_probs
+    joint = torch.nan_to_num(joint, nan=float("-inf"))
+    flat = joint.view(joint.shape[0], -1)
+    flat_idx = flat.argmax(dim=-1)
+    type_idx = flat_idx // MAX_PARAMS
+    param_idx = flat_idx % MAX_PARAMS
+    action = TYPE_BASES_T.to(device)[type_idx] + param_idx
+    return int(action.item())
+
+
+def make_policy_fn(model, deterministic: bool = True):
+    """Create a policy function for evaluation or trained-policy opponents."""
     def policy_fn(obs, action_mask):
         obs_tensor = obs_to_tensors(obs)
         with torch.no_grad():
+            if deterministic:
+                return _greedy_action(model, obs_tensor, action_mask)
             action, _, _, _ = model.get_action_and_value(obs_tensor, action_mask)
-        return action.item()
+            return action.item()
     return policy_fn
 
 
@@ -1590,6 +1630,7 @@ if __name__ == "__main__":
     rollout_num = 0
     all_episode_rewards = []
     opponent_label = "heuristic"
+    action_type_totals = np.zeros(NUM_ACTION_TYPES, dtype=np.int64)
     # V-trace replay buffer. Holds the K most recent rollouts; each PPO
     # update mixes the current rollout with the buffer so each transition is
     # reused ~K times before being dropped. K=0 disables replay (pure on-
@@ -1630,6 +1671,10 @@ if __name__ == "__main__":
         total_steps += rollout["steps"]
         total_episodes += len(rollout["episode_rewards"])
         all_episode_rewards.extend(rollout["episode_rewards"])
+        action_type_totals += rollout.get(
+            "action_type_counts",
+            np.zeros(NUM_ACTION_TYPES, dtype=np.int64),
+        )
 
         combined = combine_with_replay(rollout, replay_buffer) if REPLAY_K > 0 else rollout
         losses = ppo_update(model, optimizer, combined)
@@ -1649,6 +1694,9 @@ if __name__ == "__main__":
         pct_done = 100 * min(total_training_time / TIME_BUDGET, 1.0)
         recent_rewards = all_episode_rewards[-10:] if all_episode_rewards else [0]
         avg_reward = np.mean(recent_rewards)
+        type_total = max(int(action_type_totals.sum()), 1)
+        type_rates = action_type_totals / type_total
+        top_type_idx = int(np.argmax(type_rates))
 
         print(
             f"\rrollout {rollout_num:04d} ({pct_done:.1f}%) | "
@@ -1657,6 +1705,7 @@ if __name__ == "__main__":
             f"vf: {losses['vf_loss']:.3f} | "
             f"H: {losses['entropy']:.2f} | "
             f"R: {avg_reward:.3f} | "
+            f"top: {ACTION_TYPE_NAMES[top_type_idx]} {type_rates[top_type_idx]:.2f} | "
             f"eps: {total_episodes} | "
             f"steps: {total_steps} | "
             f"left: {remaining:.0f}s   ",
@@ -1673,8 +1722,17 @@ if __name__ == "__main__":
     # --- Evaluation ---
     print(f"\nEvaluating over {EVAL_GAMES} games vs heuristic AI...")
     model.train(False)
-    policy_fn = make_policy_fn(model)
-    eval_results = evaluate_vs_heuristic(policy_fn, num_games=EVAL_GAMES)
+    policy_fn = make_policy_fn(model, deterministic=True)
+    eval_results = evaluate_vs_heuristic(
+        policy_fn,
+        num_games=EVAL_GAMES,
+        rotate_seats=True,
+    )
+    sampled_results = evaluate_vs_heuristic(
+        make_policy_fn(model, deterministic=False),
+        num_games=max(4, EVAL_GAMES // 4),
+        rotate_seats=True,
+    )
 
     # --- League evaluation: vs every snapshot in the pool ---
     pool_paths = [str(p) for p in list_pool()]
@@ -1713,6 +1771,13 @@ if __name__ == "__main__":
         pool_size=pool_results.get("n_opponents", 0),
         elo=pool_results.get("elo"),
         persistent_elo=pool_results.get("persistent_elo"),
+        win_rate_ci95=eval_results.get("win_rate_ci95"),
+        seat_win_rates=eval_results.get("seat_win_rates"),
+        sampled_win_rate=sampled_results.get("win_rate"),
+        action_type_rates={
+            ACTION_TYPE_NAMES[i]: round(float(action_type_totals[i] / max(action_type_totals.sum(), 1)), 4)
+            for i in range(NUM_ACTION_TYPES)
+        },
     )
 
     # --- Save model ---

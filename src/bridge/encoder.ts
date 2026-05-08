@@ -205,6 +205,8 @@ export function encodeObservation(state: GameState, playerIndex: number) {
       attackerCommitted: state.pendingConflict.attackerCommitted !== null,
       isAttacker: state.pendingConflict.attacker.playerIndex === playerIndex,
       isDefender: state.pendingConflict.defender.playerIndex === playerIndex,
+      attackerHandSize: state.players[state.pendingConflict.attacker.playerIndex].hand.length,
+      defenderHandSize: state.players[state.pendingConflict.defender.playerIndex].hand.length,
     } : null,
   }
 }

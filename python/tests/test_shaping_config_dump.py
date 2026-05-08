@@ -29,9 +29,9 @@ def test_dump_writes_expected_keys(tmp_path, monkeypatch):
     # Event shaping (per-action bonuses)
     assert data["event_shaping"]["leader_place_bonus"] == pytest.approx(0.07)
     assert data["event_shaping"]["king_leader_bonus"] == pytest.approx(0.12)
-    assert data["event_shaping"]["kingdom_form_bonus"] == pytest.approx(0.10)  # default
-    assert data["event_shaping"]["treasure_collect_bonus"] == pytest.approx(0.15)  # default
-    assert data["event_shaping"]["monument_build_bonus"] == pytest.approx(0.10)  # default
+    assert data["event_shaping"]["kingdom_form_bonus"] == pytest.approx(0.0)  # default
+    assert data["event_shaping"]["treasure_collect_bonus"] == pytest.approx(0.0)  # default
+    assert data["event_shaping"]["monument_build_bonus"] == pytest.approx(0.0)  # default
     assert data["event_shaping"]["decay_steps"] == 200000
     # Score shaping (per-step potential / delta family)
     assert data["score_shaping"]["score_delta_coef"] == pytest.approx(1.5)

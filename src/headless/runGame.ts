@@ -1,4 +1,4 @@
-import { GameState, GameAction, TurnPhase } from '../engine/types'
+import { GameState, GameAction } from '../engine/types'
 import { createGame } from '../engine/setup'
 import { gameReducer } from '../engine/reducer'
 import { getAIAction } from '../ai/simpleAI'

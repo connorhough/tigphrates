@@ -49,7 +49,7 @@ BASELINE_STATE_DICT_SHAPES: dict[str, tuple[int, ...]] = {
             ("bn2.num_batches_tracked", ()),
         ]
     },
-    "trunk.0.weight": (256, 137),
+    "trunk.0.weight": (256, 139),
     "trunk.0.bias": (256,),
     "trunk.2.weight": (256, 256),
     "trunk.2.bias": (256,),
@@ -94,7 +94,7 @@ def _make_obs_batch(B: int):
         "hand_seq": torch.full((B, 6), -1, dtype=torch.int64),
         "scores": torch.zeros(B, 4, dtype=torch.float32),
         "meta": torch.zeros(B, 8, dtype=torch.float32),
-        "conflict": torch.zeros(B, 7, dtype=torch.float32),
+        "conflict": torch.zeros(B, 9, dtype=torch.float32),
         "leaders": torch.full((B, 8), -1, dtype=torch.float32),
         "opp_scores": torch.zeros(B, 4, dtype=torch.float32),
         "opp_leaders": torch.full((B, 8), -1, dtype=torch.float32),

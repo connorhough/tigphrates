@@ -337,8 +337,8 @@ def test_backward_compat_alias_matches_old_helper(monkeypatch):
     as it did before the refactor for a leader-only event."""
     # Use the documented production defaults (no king bump enabled, since the
     # alias must behave identically to the original 0.05/0.10 helper).
-    monkeypatch.delenv("LEADER_PLACE_BONUS", raising=False)
-    monkeypatch.delenv("KINGDOM_FORM_BONUS", raising=False)
+    monkeypatch.setenv("LEADER_PLACE_BONUS", "0.05")
+    monkeypatch.setenv("KINGDOM_FORM_BONUS", "0.10")
     monkeypatch.delenv("SHAPING_DECAY_STEPS", raising=False)
     # Disable the new bonuses so the alias is a strict no-op extension.
     monkeypatch.setenv("KING_LEADER_BONUS", "0.05")           # same as LEADER

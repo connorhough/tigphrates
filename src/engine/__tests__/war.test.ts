@@ -314,7 +314,7 @@ describe('war', () => {
 
     state.players[0].hand = ['red', 'green', 'green', 'green', 'green', 'green']
 
-    let result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 9, col: 9 } })
+    const result = applyAction(state, { type: 'placeTile', color: 'green', position: { row: 9, col: 9 } })
     expect(result.pendingConflict!.type).toBe('war')
     expect(result.pendingConflict!.color).toBe('green')
 

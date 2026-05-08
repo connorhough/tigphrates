@@ -27,6 +27,20 @@ export function ConflictDialog({
   onCommitSupport,
 }: ConflictDialogProps) {
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const toggle = useCallback((idx: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
+  }, [])
+
+  const handleCommit = useCallback(() => {
+    onCommitSupport(Array.from(selected))
+    setSelected(new Set())
+  }, [selected, onCommitSupport])
+
   const conflict = state.pendingConflict
   if (!conflict) return null
 
@@ -44,20 +58,6 @@ export function ConflictDialog({
   const relevant = hand
     .map((color, idx) => ({ color, idx }))
     .filter((t) => t.color === commitColor)
-
-  const toggle = useCallback((idx: number) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(idx)) next.delete(idx)
-      else next.add(idx)
-      return next
-    })
-  }, [])
-
-  const handleCommit = useCallback(() => {
-    onCommitSupport(Array.from(selected))
-    setSelected(new Set())
-  }, [selected, onCommitSupport])
 
   const attackerDyn = state.players[conflict.attacker.playerIndex]?.dynasty ?? '?'
   const defenderDyn = state.players[conflict.defender.playerIndex]?.dynasty ?? '?'

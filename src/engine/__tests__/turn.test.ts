@@ -1,6 +1,6 @@
 import { vi } from 'vitest'
 import { createGame } from '../setup'
-import { GameState } from '../types'
+import { GameState, LeaderColor } from '../types'
 import { endTurn, collectTreasures, checkGameEnd, calculateFinalScores } from '../turn'
 import * as monumentModule from '../monument'
 
@@ -8,11 +8,11 @@ const STARTING_TEMPLES: [number, number][] = [
   [0,10],[1,1],[1,15],[2,5],[4,13],[6,9],[7,1],[8,14],[9,6],[10,10],
 ]
 
-function placeLeaderOnBoard(state: GameState, playerIndex: number, color: string, row: number, col: number) {
+function placeLeaderOnBoard(state: GameState, playerIndex: number, color: LeaderColor, row: number, col: number) {
   const player = state.players[playerIndex]
   const leader = player.leaders.find(l => l.color === color)!
   leader.position = { row, col }
-  state.board[row][col].leader = { color: color as any, dynasty: player.dynasty }
+  state.board[row][col].leader = { color, dynasty: player.dynasty }
 }
 
 

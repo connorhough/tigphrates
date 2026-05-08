@@ -12,7 +12,7 @@ Output input names (in order):
     hand_seq    (6,)                       int64
     scores      (4,)                       float32
     meta        (8,)                       float32
-    conflict    (7,)                       float32
+    conflict    (9,)                       float32
     leaders     (8,)                       float32
     opp_scores  (4,)                       float32
     opp_leaders (8,)                       float32
@@ -111,7 +111,7 @@ def main():
         torch.zeros(1, 6, dtype=torch.int64),
         torch.zeros(1, 4, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),
-        torch.zeros(1, 7, dtype=torch.float32),
+        torch.zeros(1, 9, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),
         torch.zeros(1, 4, dtype=torch.float32),
         torch.zeros(1, 8, dtype=torch.float32),

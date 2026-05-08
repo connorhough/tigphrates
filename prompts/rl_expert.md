@@ -20,6 +20,11 @@ explain it precisely enough that a data scientist can act on it.
   the coefficient is wrong, not that it should be added.
 - Recent training results: `results.tsv` (commit, win_rate,
   avg_min_score, status, description).
+- The bridge contract: `python/docs/bridge_contract.md` — action space
+  partition and observation tensor layout. Read this if a trace
+  references action indices or type names you don't recognize. Do NOT
+  read `src/**`; the TS bridge is frozen and the contract doc is
+  authoritative.
 
 ## What I want from you
 

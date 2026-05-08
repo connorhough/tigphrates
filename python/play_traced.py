@@ -82,6 +82,20 @@ def _load_model(model_path: pathlib.Path) -> PolicyValueNetwork:
     if model_path.exists():
         sd = torch.load(model_path, map_location="cpu")
         sd = _adapt_state_dict(sd)
+        # Drop any tensors whose shape no longer matches the current
+        # architecture (e.g. trunk.0.weight after an obs-shape change).
+        # PyTorch's strict=False only ignores missing/unexpected keys, not
+        # dim mismatches — without filtering, load_state_dict raises.
+        own = model.state_dict()
+        skipped = [k for k, v in sd.items() if k in own and own[k].shape != v.shape]
+        if skipped:
+            print(
+                f"[play_traced] WARNING: skipping {len(skipped)} shape-mismatched "
+                f"tensor(s) in {model_path}: {skipped[:3]}{'...' if len(skipped) > 3 else ''}",
+                file=sys.stderr,
+            )
+            for k in skipped:
+                del sd[k]
         result = model.load_state_dict(sd, strict=False)
         if result.missing_keys or result.unexpected_keys:
             print(

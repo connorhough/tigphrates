@@ -79,9 +79,11 @@ def _build_policy_obs(raw: dict) -> dict:
             1.0 if conflict_raw["attackerCommitted"] else 0.0,
             1.0 if conflict_raw["isAttacker"] else 0.0,
             1.0 if conflict_raw["isDefender"] else 0.0,
+            float(conflict_raw.get("attackerHandSize", 0)),
+            float(conflict_raw.get("defenderHandSize", 0)),
         ], dtype=np.float32)
     else:
-        conflict = np.zeros(7, dtype=np.float32)
+        conflict = np.zeros(9, dtype=np.float32)
     leader_pos = np.array(raw["leaderPositions"], dtype=np.float32)
     opp_scores_raw = raw.get("opponentScores", [])
     opp_scores = np.array(opp_scores_raw[0], dtype=np.float32) if opp_scores_raw else np.zeros(4, dtype=np.float32)

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "headless": "tsx src/headless/cli.ts",
-    "bridge": "tsx src/bridge/server.ts"
+    "bridge": "tsx src/bridge/server.ts",
+    "bridge:dump-contract": "tsx scripts/dump_bridge_contract.ts > python/docs/bridge_contract.md"
   },
   "dependencies": {
     "onnxruntime-node": "^1.25.1",

@@ -12,6 +12,7 @@ Provides:
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import sys
@@ -32,6 +33,8 @@ def evaluate_vs_heuristic(
     num_games: int = EVAL_GAMES,
     player_count: int = PLAYER_COUNT,
     max_turns: int = 2000,
+    agent_player: int = 0,
+    rotate_seats: bool = False,
     mcts_simulations: int = 0,
     mcts_model=None,
     mcts_c_puct: float = 1.5,
@@ -48,6 +51,9 @@ def evaluate_vs_heuristic(
         mcts_simulations: If > 0, route the agent's action selection through
             AlphaZero-style PUCT MCTS using `mcts_model` as the policy + value
             evaluator. `policy_fn` is ignored in this mode.
+        agent_player: Seat controlled by the evaluated policy when
+            rotate_seats=False.
+        rotate_seats: If True, cycle the evaluated policy through every seat.
         mcts_model: PolicyValueNetwork instance used by MCTS (required when
             `mcts_simulations > 0`).
         mcts_c_puct: Exploration constant for PUCT.
@@ -55,33 +61,26 @@ def evaluate_vs_heuristic(
     Returns:
         dict with keys: win_rate, avg_min_score, avg_margin, games_completed, results
     """
-    env = TigphratesEnv(player_count=player_count, agent_player=0, max_turns=max_turns)
     wins = 0
     min_scores = []
     margins = []
     results = []
+    seat_results = {i: {"wins": 0, "games": 0} for i in range(player_count)}
 
-    mcts_picker = None
+    if mcts_simulations > 0 and mcts_model is None:
+        raise ValueError("mcts_model is required when mcts_simulations > 0")
+    mcts_evaluator = None
     if mcts_simulations > 0:
-        if mcts_model is None:
-            raise ValueError("mcts_model is required when mcts_simulations > 0")
-        from mcts import MCTS, build_default_evaluator  # local import
-        evaluator = build_default_evaluator(mcts_model)
-
-        def _mcts_pick():
-            env._ensure_bridge()
-            mcts = MCTS(
-                model=evaluator,
-                bridge=env._bridge,
-                num_simulations=mcts_simulations,
-                c_puct=mcts_c_puct,
-            )
-            out = mcts.pick_action(game_id=env._game_id, player_index=env.agent_player)
-            return int(out["actionIndex"])
-
-        mcts_picker = _mcts_pick
+        from mcts import build_default_evaluator  # local import
+        mcts_evaluator = build_default_evaluator(mcts_model)
 
     for g in range(num_games):
+        seat = g % player_count if rotate_seats else agent_player
+        env = TigphratesEnv(
+            player_count=player_count,
+            agent_player=seat,
+            max_turns=max_turns,
+        )
         obs, info = env.reset()
         terminated = False
         truncated = False
@@ -90,25 +89,36 @@ def evaluate_vs_heuristic(
             mask = env.action_mask()
             if mask.sum() == 0:
                 break
-            if mcts_picker is not None:
-                action = mcts_picker()
+            if mcts_evaluator is not None:
+                from mcts import MCTS  # local import
+                env._ensure_bridge()
+                mcts = MCTS(
+                    model=mcts_evaluator,
+                    bridge=env._bridge,
+                    num_simulations=mcts_simulations,
+                    c_puct=mcts_c_puct,
+                )
+                out = mcts.pick_action(game_id=env._game_id, player_index=env.agent_player)
+                action = int(out["actionIndex"])
             else:
                 action = policy_fn(obs, mask)
             obs, reward, terminated, truncated, info = env.step(action)
 
         # Extract final scores
         if "scores" in info:
-            agent_min = info["scores"][0]["min"] + info["scores"][0]["treasures"]
+            agent_score = info["scores"][seat]
+            agent_min = agent_score["min"] + agent_score["treasures"]
             opp_min = max(
-                s["min"] + s["treasures"] for s in info["scores"][1:]
+                s["min"] + s["treasures"]
+                for i, s in enumerate(info["scores"]) if i != seat
             )
             won = agent_min > opp_min
             # Tiebreak: higher total
             if agent_min == opp_min:
-                agent_total = sum(info["scores"][0][c] for c in ["red", "blue", "green", "black"])
+                agent_total = sum(agent_score[c] for c in ["red", "blue", "green", "black"])
                 opp_total = max(
                     sum(s[c] for c in ["red", "blue", "green", "black"])
-                    for s in info["scores"][1:]
+                    for i, s in enumerate(info["scores"]) if i != seat
                 )
                 won = agent_total > opp_total
         else:
@@ -118,23 +128,40 @@ def evaluate_vs_heuristic(
 
         if won:
             wins += 1
+            seat_results[seat]["wins"] += 1
+        seat_results[seat]["games"] += 1
         min_scores.append(agent_min)
         margins.append(agent_min - opp_min)
         results.append({
             "game": g,
+            "seat": seat,
             "won": won,
             "agent_min_score": agent_min,
             "opp_min_score": opp_min,
             "margin": agent_min - opp_min,
         })
 
-    env.close()
+        env.close()
+
+    win_rate = wins / num_games
+    # Wilson interval, stable for small eval batches.
+    z = 1.96
+    denom = 1.0 + z * z / num_games
+    center = (win_rate + z * z / (2 * num_games)) / denom
+    half = z * math.sqrt((win_rate * (1 - win_rate) + z * z / (4 * num_games)) / num_games) / denom
 
     return {
-        "win_rate": wins / num_games,
+        "win_rate": win_rate,
+        "win_rate_ci95": [max(0.0, center - half), min(1.0, center + half)],
         "avg_min_score": np.mean(min_scores),
         "avg_margin": np.mean(margins),
         "games_completed": num_games,
+        "seat_win_rates": {
+            str(seat): (
+                sr["wins"] / sr["games"] if sr["games"] else None
+            )
+            for seat, sr in seat_results.items()
+        },
         "results": results,
     }
 
@@ -192,11 +219,10 @@ def evaluate_vs_pool(
         def opp_policy_fn(obs, action_mask, _m=opp_model):
             # Tensorize obs; rely on the model's forward signature matching
             # the training network. Lazy import to avoid coupling.
-            from train import obs_to_tensors  # circular at import-time, fine here
+            from train import _greedy_action, obs_to_tensors  # circular at import-time, fine here
             obs_tensor = obs_to_tensors(obs)
             with torch.no_grad():
-                action, _, _, _ = _m.get_action_and_value(obs_tensor, action_mask)
-            return action.item()
+                return _greedy_action(_m, obs_tensor, action_mask)
 
         env = TigphratesEnv(
             player_count=player_count,

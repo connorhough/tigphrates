@@ -585,7 +585,7 @@ function findMonumentBlockCatastrophe(
 
       // The empty corner must be a legal placement of `threeColor` for the
       // opponent to be one move away from completing the 2x2.
-      const emptyCorner = corners.find((p, i) => {
+      const emptyCorner = corners.find((_corner, i) => {
         const cell = cells[i]
         return cell.tile === null && cell.leader === null && !cell.catastrophe && cell.monument === null
       })

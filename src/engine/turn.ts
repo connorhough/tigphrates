@@ -153,5 +153,9 @@ export function calculateFinalScores(
     return 0
   })
 
-  return results.map(({ _sorted, ...rest }) => rest)
+  return results.map(result => ({
+    playerIndex: result.playerIndex,
+    finalScore: result.finalScore,
+    colorScores: result.colorScores,
+  }))
 }

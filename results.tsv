@@ -49,3 +49,13 @@ c9e00ea	0.020000	0.8	discard	+NUM_ENVS = 4              # parallel environments 
 2398d68	0.020000	1.4	keep	baseline PPO
 067e840	0.020000	1.6	discard	+ +class RunningMeanStd: +    """Online running mean/variance for reward normali
 5db241e	0.020000	1.0	discard	+PPO_EPOCHS = 8            # optimization epochs per rollout — doubled for more
+b2fae18	0.000000	0.0	crash	timeout/crash: baseline PPO
+a96b065	0.000000	0.0	crash	timeout/crash: +SYMMETRY_AUG = os.environ.get("SYMMETRY_AUG", "0") == "1"  # disabled — doubl
+77d0ff2	0.000000	0.0	crash	timeout/crash: +CURRICULUM_HEURISTIC_END = float(os.environ.get("CURRICULUM_HEURISTIC_END", 0.7
+976941b	0.140000	5.4	keep	+# RES_BLOCKS halved 6->3: recent baselines timed out at 5min budget. Halving +# (vs_pool=0.6458333333333334)
+976941b	0.100000	6.4	keep	+# RES_BLOCKS halved 6->3: recent baselines timed out at 5min budget. Halving +# (vs_pool=0.75)
+976941b	0.020000	3.1	discard	+# RES_BLOCKS halved 6->3: recent baselines timed out at 5min budget. Halving +# (vs_pool=0.5)
+8e9aaad	0.000000	0.0	crash	timeout/crash: +MARGIN_DELTA_COEF = float(os.environ.get("MARGIN_DELTA_COEF", 2.0))  # boosted:
+140657c	0.000000	0.0	crash	timeout/crash: +# Linear anneal from ENTROPY_COEF (start) to ENTROPY_COEF_FINAL (end of +# trai
+80f5613	0.000000	0.0	crash	timeout/crash: +POTENTIAL_GAMMA_SHAPING_COEF = float(os.environ.get("POTENTIAL_GAMMA_SHAPING_CO
+6364287	0.000000	0.0	crash	timeout/crash: +REPLAY_K = int(os.environ.get("REPLAY_K", 0))  # disabled: PPO update was 6× o

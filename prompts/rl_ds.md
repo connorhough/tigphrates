@@ -25,10 +25,17 @@ that addresses the most pressing issue from the critique.
   recent changes unless you have strong evidence (in the critique or
   results) that the prior direction was wrong.
 - The current `python/train.py`. Read it; do not assume its layout.
+- The bridge contract: `python/docs/bridge_contract.md` — action space
+  partition, observation tensor layout, reward signal, RPC list. The TS
+  bridge is frozen for this run; this doc is the only thing you need to
+  know about its shape.
 
 ## Rules
 
 - Edit ONLY `python/train.py`. No other files.
+- Do NOT read files outside `python/` or `prompts/`. The TS source
+  (`src/**`) is out of scope; if you need bridge-shape info, read
+  `python/docs/bridge_contract.md`.
 - ONE focused change per run. Do not bundle.
 - Code must run: `python python/train.py` (a 5-min budget then a 50-game
   evaluation pass). Imports limited to torch, numpy, gymnasium — no new

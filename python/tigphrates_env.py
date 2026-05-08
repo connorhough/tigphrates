@@ -139,11 +139,11 @@ def compute_event_shaping_bonus(
 
     Reads env vars at call time so test monkeypatching works.
     """
-    place_bonus = float(os.environ.get("LEADER_PLACE_BONUS", "0.05"))
-    kingdom_bonus = float(os.environ.get("KINGDOM_FORM_BONUS", "0.1"))
-    king_bonus = float(os.environ.get("KING_LEADER_BONUS", "0.10"))
-    treasure_bonus = float(os.environ.get("TREASURE_COLLECT_BONUS", "0.15"))
-    monument_bonus = float(os.environ.get("MONUMENT_BUILD_BONUS", "0.10"))
+    place_bonus = float(os.environ.get("LEADER_PLACE_BONUS", "0.0"))
+    kingdom_bonus = float(os.environ.get("KINGDOM_FORM_BONUS", "0.0"))
+    king_bonus = float(os.environ.get("KING_LEADER_BONUS", "0.0"))
+    treasure_bonus = float(os.environ.get("TREASURE_COLLECT_BONUS", "0.0"))
+    monument_bonus = float(os.environ.get("MONUMENT_BUILD_BONUS", "0.0"))
     decay_steps = int(os.environ.get("SHAPING_DECAY_STEPS", "200000"))
 
     # Fast no-op short-circuit: when every bonus is zero, this is a no-op
@@ -205,10 +205,9 @@ def compute_leader_shaping_bonus(
     """Backward-compatible alias for the original leader-only shaping helper.
 
     Forwards to `compute_event_shaping_bonus` with `monument_builds_so_far=0`.
-    The treasure/monument/king bonuses default to zero only if the caller has
-    explicitly cleared the env vars; the new defaults (KING=0.10, TREASURE=0.15,
-    MONUMENT=0.10) are documented in compute_event_shaping_bonus and the
-    callers in train.py opt into the richer signature directly.
+    Event bonuses default to zero so potential-based score shaping remains the
+    production baseline; callers can opt into the richer event shaping with
+    env vars.
 
     Existing test_shaping.py callers monkeypatch only the LEADER/KINGDOM env
     vars and rely on the new bonuses being absent for non-treasure / non-monument
@@ -286,7 +285,7 @@ class TigphratesEnv(gym.Env):
         - scores: (4,) int — VP by color
         - meta: (8,) float — treasures, catastrophes, bag_size, actions_remaining,
                               turn_phase, current_player, player_index, num_players
-        - conflict: (7,) float — conflict info or zeros
+        - conflict: (9,) float — conflict info or zeros (last 2: attacker/defender hand sizes)
 
     Action: int in [0, ACTION_SPACE_SIZE) with masking
     """
@@ -318,7 +317,7 @@ class TigphratesEnv(gym.Env):
             "hand_seq": spaces.Box(-1, 3, shape=(6,), dtype=np.int32),
             "scores": spaces.Box(0, 200, shape=(4,), dtype=np.int32),
             "meta": spaces.Box(-1, 500, shape=(8,), dtype=np.float32),
-            "conflict": spaces.Box(-1, 200, shape=(7,), dtype=np.float32),
+            "conflict": spaces.Box(-1, 200, shape=(9,), dtype=np.float32),
             "leaders": spaces.Box(-1, 16, shape=(8,), dtype=np.float32),
             "opp_scores": spaces.Box(0, 200, shape=(4,), dtype=np.float32),
             "opp_leaders": spaces.Box(-1, 16, shape=(8,), dtype=np.float32),
@@ -428,9 +427,11 @@ class TigphratesEnv(gym.Env):
                 1.0 if conflict_raw["attackerCommitted"] else 0.0,
                 1.0 if conflict_raw["isAttacker"] else 0.0,
                 1.0 if conflict_raw["isDefender"] else 0.0,
+                float(conflict_raw.get("attackerHandSize", 0)),
+                float(conflict_raw.get("defenderHandSize", 0)),
             ], dtype=np.float32)
         else:
-            conflict = np.zeros(7, dtype=np.float32)
+            conflict = np.zeros(9, dtype=np.float32)
         leader_pos = np.array(raw["leaderPositions"], dtype=np.float32)
         opp_scores_raw = raw.get("opponentScores", [])
         opp_scores = (np.array(opp_scores_raw[0], dtype=np.float32)
@@ -578,9 +579,11 @@ class TigphratesEnv(gym.Env):
                 1.0 if conflict_raw["attackerCommitted"] else 0.0,
                 1.0 if conflict_raw["isAttacker"] else 0.0,
                 1.0 if conflict_raw["isDefender"] else 0.0,
+                float(conflict_raw.get("attackerHandSize", 0)),
+                float(conflict_raw.get("defenderHandSize", 0)),
             ], dtype=np.float32)
         else:
-            conflict = np.zeros(7, dtype=np.float32)
+            conflict = np.zeros(9, dtype=np.float32)
         leader_pos = np.array(raw["leaderPositions"], dtype=np.float32)
         opp_scores_raw = raw.get("opponentScores", [])
         opp_scores = np.array(opp_scores_raw[0], dtype=np.float32) if opp_scores_raw else np.zeros(4, dtype=np.float32)
@@ -624,9 +627,11 @@ class TigphratesEnv(gym.Env):
                 1.0 if conflict_raw["attackerCommitted"] else 0.0,
                 1.0 if conflict_raw["isAttacker"] else 0.0,
                 1.0 if conflict_raw["isDefender"] else 0.0,
+                float(conflict_raw.get("attackerHandSize", 0)),
+                float(conflict_raw.get("defenderHandSize", 0)),
             ], dtype=np.float32)
         else:
-            conflict = np.zeros(7, dtype=np.float32)
+            conflict = np.zeros(9, dtype=np.float32)
 
         # Own leader positions (4 leaders × row,col)
         leader_pos = np.array(raw["leaderPositions"], dtype=np.float32)

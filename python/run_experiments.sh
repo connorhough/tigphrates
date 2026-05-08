@@ -12,6 +12,12 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# Regenerate the bridge contract doc the prompts reference. Failing here means
+# the encoder constants and the doc's hand-curated PARAM_DOCS are out of sync;
+# stop before launching any training run on a stale contract.
+echo "Refreshing python/docs/bridge_contract.md..."
+npm run --silent bridge:dump-contract
+
 DRY_RUN=false
 POSITIONAL=()
 for arg in "$@"; do

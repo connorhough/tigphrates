@@ -61,8 +61,10 @@ export function buildFeedsForOnnx(
         obs.conflict.attackerCommitted ? 1 : 0,
         obs.conflict.isAttacker ? 1 : 0,
         obs.conflict.isDefender ? 1 : 0,
+        obs.conflict.attackerHandSize ?? 0,
+        obs.conflict.defenderHandSize ?? 0,
       ])
-    : new Float32Array(7)
+    : new Float32Array(9)
   const leaders = Float32Array.from(obs.leaderPositions)
   const oppScoresArr = obs.opponentScores[0] ?? [0, 0, 0, 0]
   const oppLeadersArr = obs.opponentLeaderPositions[0] ?? new Array(8).fill(-1)
@@ -80,7 +82,7 @@ export function buildFeedsForOnnx(
     hand_seq: new TensorClass('int64', handSeq, [1, HAND_MAX]),
     scores: new TensorClass('float32', scores, [1, 4]),
     meta: new TensorClass('float32', meta, [1, 8]),
-    conflict: new TensorClass('float32', conflict, [1, 7]),
+    conflict: new TensorClass('float32', conflict, [1, 9]),
     leaders: new TensorClass('float32', leaders, [1, 8]),
     opp_scores: new TensorClass('float32', oppScores, [1, 4]),
     opp_leaders: new TensorClass('float32', oppLeaders, [1, 8]),

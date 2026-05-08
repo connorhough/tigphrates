@@ -97,7 +97,8 @@ export function useGame(options: UseGameOptions = {}): UseGameReturn {
       )
     }
 
-    const { playerIndex: _ignore, ...gameAction } = action
+    const gameAction: GameAction & { playerIndex?: number } = { ...action }
+    delete gameAction.playerIndex
     pushUnique(logRef.current, formatActionLine(gameAction as GameAction, prev, next))
     const conflict = conflictResolutionLine(prev, next)
     if (conflict) pushUnique(logRef.current, conflict)

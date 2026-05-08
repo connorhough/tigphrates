@@ -23,16 +23,16 @@ from typing import Any
 # Defaults mirror python/tigphrates_env.py:compute_event_shaping_bonus
 # and python/train.py reward-shaping block (see SCORE_DELTA_COEF etc).
 _EVENT_DEFAULTS = {
-    "LEADER_PLACE_BONUS": 0.05,
-    "KINGDOM_FORM_BONUS": 0.10,
-    "KING_LEADER_BONUS": 0.10,
-    "TREASURE_COLLECT_BONUS": 0.15,
-    "MONUMENT_BUILD_BONUS": 0.10,
+    "LEADER_PLACE_BONUS": 0.0,
+    "KINGDOM_FORM_BONUS": 0.0,
+    "KING_LEADER_BONUS": 0.0,
+    "TREASURE_COLLECT_BONUS": 0.0,
+    "MONUMENT_BUILD_BONUS": 0.0,
     "SHAPING_DECAY_STEPS": 200000,
 }
 _SCORE_DEFAULTS = {
     "SCORE_DELTA_COEF": 1.5,
-    "MARGIN_DELTA_COEF": 1.0,
+    "MARGIN_DELTA_COEF": 0.0,
     "POTENTIAL_GAMMA_SHAPING_COEF": 1.0,
 }
 _BC_DEFAULTS = {

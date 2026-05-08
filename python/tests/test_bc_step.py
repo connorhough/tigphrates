@@ -36,7 +36,7 @@ def _make_obs_dict(batch_size: int) -> dict:
         "hand_seq": -np.ones((batch_size, 6), dtype=np.int64),
         "scores": np.zeros((batch_size, 4), dtype=np.float32),
         "meta": np.zeros((batch_size, 8), dtype=np.float32),
-        "conflict": np.zeros((batch_size, 7), dtype=np.float32),
+        "conflict": np.zeros((batch_size, 9), dtype=np.float32),
         "leaders": np.zeros((batch_size, 8), dtype=np.float32),
         "opp_scores": np.zeros((batch_size, 4), dtype=np.float32),
         "opp_leaders": np.zeros((batch_size, 8), dtype=np.float32),

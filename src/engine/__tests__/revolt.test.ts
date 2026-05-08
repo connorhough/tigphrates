@@ -217,7 +217,7 @@ describe('revolt', () => {
     // Add a face-up red temple at (2,0) adjacent to attacker
     state.board[2][0].tile = 'red'
 
-    let result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 2, col: 1 } })
+    const result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 2, col: 1 } })
     // Attacker: (2,0) is face-up red temple, (1,1) is flipped → only 1
     // Defender: (1,1) is flipped → 0
     expect(result.pendingConflict!.attackerStrength).toBe(1)
@@ -248,7 +248,7 @@ describe('revolt', () => {
     const state = setupRevolt()
     state.players[0].hand = ['red', 'blue', 'green', 'green', 'black', 'black']
 
-    let result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 2, col: 1 } })
+    const result = applyAction(state, { type: 'placeLeader', color: 'red', position: { row: 2, col: 1 } })
     // Try to commit a blue tile (index 1)
     expect(() => applyAction(result, { type: 'commitSupport', indices: [1] })).toThrow(/red/i)
   })
