@@ -23,7 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 __pycache__/
-models/
+models/*
+!models/current/
+models/current/*
+!models/current/manifest.json
 *.pt
 
 # RL artifacts: regenerate locally instead of tracking binaries

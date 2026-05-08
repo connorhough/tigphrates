@@ -1,0 +1,21 @@
+{
+  "created_at": "2026-05-08T20:15:44+00:00",
+  "metrics": {
+    "smoke_avg_margin": -41.1667,
+    "smoke_avg_min_score": 15.0,
+    "smoke_win_rate": 0.1667
+  },
+  "notes": "Promoted from ds_may08/current root policy; smoke evaluated over 6 games vs heuristic.",
+  "onnx": {
+    "path": "models/current/policy.onnx",
+    "sha256": "1c4e598146e5f65857fdd47712f32ba5eee58c9aa304e7f1dfaaeb4ac0ad1a11",
+    "size_bytes": 2391319,
+    "source": "models/policy.onnx"
+  },
+  "path": "models/current/policy.pt",
+  "promoted": true,
+  "run_id": "ds_may08",
+  "sha256": "8a49d557824f6d624ec11910a7d2df5fbd6f3e0d83bd17228a52e40571659624",
+  "size_bytes": 2417789,
+  "source": "models/policy_final.pt"
+}
